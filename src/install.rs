@@ -190,7 +190,10 @@ mod tests {
         let prism = base.join("prism");
         let van = base.join("van");
         for (dir, name) in [
-            (prism.join("libraries/com/mojang/minecraft/1.20.1"), "minecraft-1.20.1-client.jar"),
+            (
+                prism.join("libraries/com/mojang/minecraft/1.20.1"),
+                "minecraft-1.20.1-client.jar",
+            ),
             (van.join("versions/1.12.2"), "1.12.2.jar"),
         ] {
             fs::create_dir_all(&dir).unwrap();

@@ -27,7 +27,12 @@ impl std::fmt::Debug for Rgba {
 impl Rgba {
     pub fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
         let i = ((y * self.width + x) * 4) as usize;
-        [self.data[i], self.data[i + 1], self.data[i + 2], self.data[i + 3]]
+        [
+            self.data[i],
+            self.data[i + 1],
+            self.data[i + 2],
+            self.data[i + 3],
+        ]
     }
 
     pub fn alpha(&self, x: u32, y: u32) -> u8 {
@@ -241,7 +246,10 @@ impl McMeta {
         };
         Ok(McMeta {
             animation: Some(RawAnimation {
-                interpolate: a.get("interpolate").and_then(|b| b.as_bool()).unwrap_or(false),
+                interpolate: a
+                    .get("interpolate")
+                    .and_then(|b| b.as_bool())
+                    .unwrap_or(false),
                 frametime,
                 width: num("width"),
                 height: num("height"),

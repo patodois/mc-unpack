@@ -24,7 +24,14 @@ pub enum Dir {
 }
 
 impl Dir {
-    pub const ALL: [Dir; 6] = [Dir::Down, Dir::Up, Dir::North, Dir::South, Dir::West, Dir::East];
+    pub const ALL: [Dir; 6] = [
+        Dir::Down,
+        Dir::Up,
+        Dir::North,
+        Dir::South,
+        Dir::West,
+        Dir::East,
+    ];
 
     pub fn parse(s: &str) -> Option<Dir> {
         match s {
@@ -84,7 +91,12 @@ pub enum ElementRotation {
         rescale: bool,
     },
     /// `{origin, x, y, z}` (26.x): three angles in degrees, composed as `Rx * Ry * Rz`
-    Euler { origin: [f64; 3], x: f64, y: f64, z: f64 },
+    Euler {
+        origin: [f64; 3],
+        x: f64,
+        y: f64,
+        z: f64,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -199,7 +211,10 @@ impl RawModel {
             textures,
             elements,
             ambient_occlusion: o.get("ambientocclusion").and_then(|b| b.as_bool()),
-            gui_light: o.get("gui_light").and_then(|s| s.as_str()).map(String::from),
+            gui_light: o
+                .get("gui_light")
+                .and_then(|s| s.as_str())
+                .map(String::from),
             display: o.get("display").cloned(),
         })
     }
@@ -233,12 +248,12 @@ fn parse_element(v: &Value) -> Result<Element> {
             .and_then(|t| t.as_str())
             .ok_or_else(|| anyhow!("face {k}: no `texture`"))?
             .to_string();
-        let cullface = match fobj.get("cullface").and_then(|c| c.as_str()) {
-            None => None,
-            Some(c) => Some(
-                Dir::parse(c).ok_or_else(|| anyhow!("face {k}: unknown cullface {c:?}"))?,
-            ),
-        };
+        // The game reads a name it does not know as "no cull face" (1.13 to 1.21 have a scaffolding
+        // model that says "bottom"), so this does too
+        let cullface = fobj
+            .get("cullface")
+            .and_then(|c| c.as_str())
+            .and_then(Dir::parse);
         let rot = fobj.get("rotation").and_then(|r| r.as_i64()).unwrap_or(0);
         if rot.rem_euclid(90) != 0 {
             bail!("face {k}: rotation {rot} is not a multiple of 90");
@@ -292,7 +307,9 @@ fn parse_rotation(v: &Value) -> Result<ElementRotation> {
         return Ok(ElementRotation::Axis {
             origin,
             axis,
-            angle: angle.as_f64().ok_or_else(|| anyhow!("angle is not a number"))?,
+            angle: angle
+                .as_f64()
+                .ok_or_else(|| anyhow!("angle is not a number"))?,
             rescale: o.get("rescale").and_then(|b| b.as_bool()).unwrap_or(false),
         });
     }
@@ -475,7 +492,9 @@ mod tests {
     use std::collections::HashMap;
 
     fn files(list: &[(&str, &str)]) -> HashMap<String, String> {
-        list.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+        list.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
     }
 
     fn res(id: &str, f: &HashMap<String, String>) -> Result<ResolvedModel> {
@@ -492,8 +511,14 @@ mod tests {
     fn parent_chain_merges_textures_and_inherits_elements() {
         let f = files(&[
             ("block/cube", CUBE),
-            ("block/cube_all", r#"{"parent":"block/cube","textures":{"extra":"x/y"}}"#),
-            ("block/stone", r#"{"parent":"minecraft:block/cube_all","textures":{"all":"minecraft:block/stone"}}"#),
+            (
+                "block/cube_all",
+                r#"{"parent":"block/cube","textures":{"extra":"x/y"}}"#,
+            ),
+            (
+                "block/stone",
+                r#"{"parent":"minecraft:block/cube_all","textures":{"all":"minecraft:block/stone"}}"#,
+            ),
         ]);
         let m = res("block/stone", &f).unwrap();
         assert_eq!(m.chain, ["block/stone", "block/cube_all", "block/cube"]);
@@ -513,7 +538,10 @@ mod tests {
     fn child_elements_replace_parent_elements() {
         let f = files(&[
             ("block/cube", CUBE),
-            ("block/slab", r##"{"parent":"block/cube","elements":[{"from":[0,0,0],"to":[16,8,16],"faces":{"up":{"texture":"#all"}}}]}"##),
+            (
+                "block/slab",
+                r##"{"parent":"block/cube","elements":[{"from":[0,0,0],"to":[16,8,16],"faces":{"up":{"texture":"#all"}}}]}"##,
+            ),
         ]);
         let m = res("block/slab", &f).unwrap();
         assert_eq!(m.elements.len(), 1);
@@ -531,7 +559,10 @@ mod tests {
 
     #[test]
     fn variable_chains_and_loops() {
-        let f = files(&[("a", r##"{"textures":{"a":"#b","b":"#c","c":"t/x","l1":"#l2","l2":"#l1"}}"##)]);
+        let f = files(&[(
+            "a",
+            r##"{"textures":{"a":"#b","b":"#c","c":"t/x","l1":"#l2","l2":"#l1"}}"##,
+        )]);
         let m = res("a", &f).unwrap();
         assert_eq!(m.texture("#a").unwrap().path, "t/x");
         assert!(m.texture("#l1").is_err());
@@ -543,18 +574,28 @@ mod tests {
     fn builtin_roots() {
         let f = files(&[
             ("item/generated", r#"{"parent":"builtin/generated"}"#),
-            ("item/sword", r#"{"parent":"item/generated","textures":{"layer0":"item/sword"}}"#),
+            (
+                "item/sword",
+                r#"{"parent":"item/generated","textures":{"layer0":"item/sword"}}"#,
+            ),
             ("item/chest", r#"{"parent":"builtin/entity"}"#),
         ]);
         let m = res("item/sword", &f).unwrap();
         assert_eq!(m.builtin, Some(Builtin::Generated));
         assert_eq!(m.layers(), vec![(0, "item/sword")]);
-        assert_eq!(res("item/chest", &f).unwrap().builtin, Some(Builtin::Entity));
+        assert_eq!(
+            res("item/chest", &f).unwrap().builtin,
+            Some(Builtin::Entity)
+        );
     }
 
     #[test]
     fn parent_loop_and_missing_parent() {
-        let f = files(&[("a", r#"{"parent":"b"}"#), ("b", r#"{"parent":"a"}"#), ("c", r#"{"parent":"nope"}"#)]);
+        let f = files(&[
+            ("a", r#"{"parent":"b"}"#),
+            ("b", r#"{"parent":"a"}"#),
+            ("c", r#"{"parent":"nope"}"#),
+        ]);
         assert!(res("a", &f).unwrap_err().to_string().contains("loop"));
         assert!(res("c", &f).is_err());
     }
@@ -566,7 +607,13 @@ mod tests {
             r##"{"textures":{"line":{"sprite":"block/dust","force_translucent":true},"x":"#line"}}"##,
         )]);
         let m = res("a", &f).unwrap();
-        assert_eq!(m.texture("#x").unwrap(), TexturePath { path: "block/dust".into(), translucent: true });
+        assert_eq!(
+            m.texture("#x").unwrap(),
+            TexturePath {
+                path: "block/dust".into(),
+                translucent: true
+            }
+        );
     }
 
     #[test]
@@ -578,13 +625,28 @@ mod tests {
         )
         .unwrap();
         let e = m.elements.unwrap();
-        assert!(matches!(e[0].rotation, Some(ElementRotation::Axis { angle, rescale: true, .. }) if angle == -22.5));
-        assert!(matches!(e[1].rotation, Some(ElementRotation::Euler { x, y, z, .. }) if x == 180.0 && y == -67.5 && z == -180.0));
+        assert!(
+            matches!(e[0].rotation, Some(ElementRotation::Axis { angle, rescale: true, .. }) if angle == -22.5)
+        );
+        assert!(
+            matches!(e[1].rotation, Some(ElementRotation::Euler { x, y, z, .. }) if x == 180.0 && y == -67.5 && z == -180.0)
+        );
+    }
+
+    #[test]
+    fn an_unknown_cullface_name_means_no_cull_face() {
+        let m = RawModel::parse(
+            r##"{"elements":[{"from":[0,0,0],"to":[1,1,1],"faces":{"down":{"texture":"#a","cullface":"bottom"}}}]}"##,
+        )
+        .unwrap();
+        assert_eq!(m.elements.unwrap()[0].faces[0].1.cullface, None);
     }
 
     #[test]
     fn bad_models_are_errors() {
-        assert!(RawModel::parse(r##"{"elements":[{"from":[0,0],"to":[1,1,1],"faces":{}}]}"##).is_err());
+        assert!(
+            RawModel::parse(r##"{"elements":[{"from":[0,0],"to":[1,1,1],"faces":{}}]}"##).is_err()
+        );
         assert!(RawModel::parse(r##"{"elements":[{"from":[0,0,0],"to":[1,1,1],"faces":{"sideways":{"texture":"#a"}}}]}"##).is_err());
         assert!(RawModel::parse("[]").is_err());
         assert!(normalize_location("other:thing").is_err());

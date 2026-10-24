@@ -66,6 +66,8 @@ pub struct Report {
     pub item_templates: u64,
     pub quads: u64,
     pub failures: Vec<String>,
+    /// Things in Mojang's files that are wrong and that the game tolerates; not counted as failures
+    pub upstream_defects: Vec<String>,
     pub seconds: f64,
 }
 
@@ -98,6 +100,9 @@ fn left_out_key(l: &LeftOut) -> String {
         LeftOut::NoElements => "model without elements".into(),
         LeftOut::NoPartMatched => "no multipart part matched".into(),
         LeftOut::Template => "template".into(),
+        LeftOut::MissingTexture => {
+            "every face names a texture that does not exist (upstream defect)".into()
+        }
     }
 }
 
@@ -167,7 +172,11 @@ fn check_textures(a: &Assets, r: &mut Report) {
             }
         }
     }
-    for k in [ColormapKind::Grass, ColormapKind::Foliage, ColormapKind::DryFoliage] {
+    for k in [
+        ColormapKind::Grass,
+        ColormapKind::Foliage,
+        ColormapKind::DryFoliage,
+    ] {
         if !jar.contains(k.file()) {
             continue;
         }
@@ -212,7 +221,11 @@ fn check_models(a: &Assets, r: &mut Report) {
                 a.model(&id)?;
                 Ok(())
             })();
-            let c = if count == 0 { &mut r.block_models } else { &mut r.item_models };
+            let c = if count == 0 {
+                &mut r.block_models
+            } else {
+                &mut r.item_models
+            };
             c.tally(ok.is_ok());
             if let Err(e) = ok {
                 r.fail("model", &id, e);
@@ -239,7 +252,15 @@ fn check_models(a: &Assets, r: &mut Report) {
             Ok(None) => r.blocks.ok += 1,
             Ok(Some(lo)) => {
                 r.blocks.ok += 1;
-                r.blocks_left_out.entry(left_out_key(&lo)).or_default().push(n.clone());
+                // say more when the item of the same name shows the block is drawn in code
+                let lo = match (lo, a.classify_block(&n)) {
+                    (LeftOut::NoElements, Ok(Some(better))) => better,
+                    (lo, _) => lo,
+                };
+                r.blocks_left_out
+                    .entry(left_out_key(&lo))
+                    .or_default()
+                    .push(n.clone());
             }
             Err(e) => {
                 r.blocks.failed += 1;
@@ -266,7 +287,10 @@ fn check_models(a: &Assets, r: &mut Report) {
                     referenced.insert(q.texture.clone());
                 }
                 if let Some(lo) = b.report.left_out {
-                    r.items_left_out.entry(left_out_key(&lo)).or_default().push(n.clone());
+                    r.items_left_out
+                        .entry(left_out_key(&lo))
+                        .or_default()
+                        .push(n.clone());
                 }
             }
             Err(e) => {
@@ -278,8 +302,14 @@ fn check_models(a: &Assets, r: &mut Report) {
     // Every texture a face uses has to exist and decode (the pass above only counted PNGs)
     for t in &referenced {
         if let Err(e) = a.texture(t) {
-            r.blocks.failed += 1;
-            r.fail("texture of a face", t, e);
+            // A name with no folder (`all` instead of `#all`) cannot be a texture: the game reads
+            // it as a missing texture and goes on. That is a defect in Mojang's file, not here.
+            if !t.contains('/') {
+                r.upstream_defects.push(format!("a face names texture `{t}`, which cannot exist (a `#` is missing?); the game draws its missing-texture pattern"));
+            } else {
+                r.blocks.failed += 1;
+                r.fail("texture of a face", t, e);
+            }
         }
     }
 }
@@ -328,7 +358,11 @@ pub fn peak_rss() -> u64 {
         if unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut ru) } == 0 {
             let v = ru.ru_maxrss as u64;
             // macOS reports bytes, Linux kilobytes
-            return if cfg!(target_os = "macos") { v } else { v * 1024 };
+            return if cfg!(target_os = "macos") {
+                v
+            } else {
+                v * 1024
+            };
         }
     }
     0
@@ -347,8 +381,18 @@ mod tests {
         assert_eq!(r.blockstates.ok, 5);
         assert!(r.blocks.ok == 5);
         // the chest-like block is left out, not failed
-        assert_eq!(r.blocks_left_out.get("model without elements").map(|v| v.len()), Some(1));
-        assert_eq!(r.items_left_out.get("builtin/entity model").map(|v| v.len()), Some(1));
+        assert_eq!(
+            r.blocks_left_out
+                .get("model without elements")
+                .map(|v| v.len()),
+            Some(1)
+        );
+        assert_eq!(
+            r.items_left_out
+                .get("builtin/entity model")
+                .map(|v| v.len()),
+            Some(1)
+        );
         // item/generated is a template
         assert_eq!(r.item_templates, 1);
         assert!(r.textures.ok >= 3);
@@ -358,16 +402,30 @@ mod tests {
     fn a_broken_model_is_counted_and_named() {
         use crate::jar::testjar::{png, JarBuilder};
         let jar = JarBuilder::new()
-            .add("assets/minecraft/blockstates/a.json", r#"{"variants":{"":{"model":"block/missing"}}}"#)
+            .add(
+                "assets/minecraft/blockstates/a.json",
+                r#"{"variants":{"":{"model":"block/missing"}}}"#,
+            )
             .add("assets/minecraft/blockstates/b.json", "{not json")
-            .add("assets/minecraft/models/block/bad.json", r#"{"parent":"block/nowhere"}"#)
-            .add("assets/minecraft/textures/block/t.png", png(1, 1, |_, _| [0, 0, 0, 255]))
+            .add(
+                "assets/minecraft/models/block/bad.json",
+                r#"{"parent":"block/nowhere"}"#,
+            )
+            .add(
+                "assets/minecraft/textures/block/t.png",
+                png(1, 1, |_, _| [0, 0, 0, 255]),
+            )
             .build();
         let a = Assets::from_jar(jar).unwrap();
         let r = run(&a).unwrap();
         assert_eq!(r.blockstates.failed, 1);
         assert_eq!(r.block_models.failed, 1);
-        assert_eq!(r.blocks.failed, 0 + 1 /* a: missing model */);
-        assert!(r.failures.iter().any(|f| f.contains("block a")), "{:?}", r.failures);
+        // block a: its model is missing
+        assert_eq!(r.blocks.failed, 1);
+        assert!(
+            r.failures.iter().any(|f| f.contains("block a")),
+            "{:?}",
+            r.failures
+        );
     }
 }

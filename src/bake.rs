@@ -99,7 +99,10 @@ fn rot_axis(axis: Axis, deg: f64) -> M3 {
 /// The block rotation of a variant: `x` first, then `y`; positive `y` is clockwise seen from above
 /// and positive `x` tips the top toward north, which are right-handed turns by `-y` and `-x`
 fn variant_matrix(x: i32, y: i32) -> M3 {
-    mul(&rot_axis(Axis::Y, -(y as f64)), &rot_axis(Axis::X, -(x as f64)))
+    mul(
+        &rot_axis(Axis::Y, -(y as f64)),
+        &rot_axis(Axis::X, -(x as f64)),
+    )
 }
 
 /// Per direction, the four corners (top-left, bottom-left, bottom-right, top-right) as
@@ -302,7 +305,10 @@ pub fn bake_element(
             let nd = variant_dir(&vm, *dir);
             for u in uv.iter_mut() {
                 let on_plane = unplane_uv(*dir, *u);
-                let r = apply(&vm, [on_plane[0] - 8.0, on_plane[1] - 8.0, on_plane[2] - 8.0]);
+                let r = apply(
+                    &vm,
+                    [on_plane[0] - 8.0, on_plane[1] - 8.0, on_plane[2] - 8.0],
+                );
                 *u = plane_uv(nd, [r[0] + 8.0, r[1] + 8.0, r[2] + 8.0]);
             }
         }
@@ -310,12 +316,20 @@ pub fn bake_element(
         let e1 = sub(pos[1], pos[0]);
         let e2 = sub(pos[2], pos[1]);
         let c = cross(e1, e2);
-        let len = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt();
-        let normal = if len > 1e-9 {
-            [c[0] / len, c[1] / len, c[2] / len]
+        let clen = norm(c);
+        let normal = if clen > 1e-9 {
+            [c[0] / clen, c[1] / clen, c[2] / clen]
         } else {
             n
         };
+        // A face with no area (the sides of a flat element: the cross-model planes have an east
+        // and a west face of zero width when written with a face for every side) draws nothing
+        let e3 = sub(pos[3], pos[2]);
+        let c2 = cross(e2, e3);
+        let area = clen + norm(c2);
+        if area < 1e-9 {
+            continue;
+        }
         let cull = face.cullface.map(|d| variant_dir(&vm, d));
         out.push(Quad {
             pos: pos.map(|p| [snap(p[0] / 16.0), snap(p[1] / 16.0), snap(p[2] / 16.0)]),
@@ -323,7 +337,11 @@ pub fn bake_element(
             uv: uv.map(|u| [snap(u[0] / 16.0), snap(u[1] / 16.0)]),
             texture: tex.clone(),
             tint_index: face.tintindex,
-            cullface: if identity_variant { face.cullface } else { cull },
+            cullface: if identity_variant {
+                face.cullface
+            } else {
+                cull
+            },
             face: *dir,
             shade: el.shade,
             translucent,
@@ -331,6 +349,10 @@ pub fn bake_element(
         });
     }
     Ok(())
+}
+
+fn norm(v: V3) -> f64 {
+    (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt()
 }
 
 fn apply_i(d: Dir) -> V3 {
@@ -353,8 +375,12 @@ fn cross(a: V3, b: V3) -> V3 {
 /// A direction after a block rotation (whole axes only)
 fn variant_dir(vm: &M3, d: Dir) -> Dir {
     let r = apply(vm, apply_i(d));
-    Dir::from_normal([r[0].round() as i32, r[1].round() as i32, r[2].round() as i32])
-        .expect("a quarter turn keeps axes")
+    Dir::from_normal([
+        r[0].round() as i32,
+        r[1].round() as i32,
+        r[2].round() as i32,
+    ])
+    .expect("a quarter turn keeps axes")
 }
 
 /// Bakes every element of a resolved model
@@ -387,7 +413,12 @@ pub fn check_face(model: &ResolvedModel, face: &Face) -> Result<()> {
 mod tests {
     use super::*;
 
-    fn el(from: V3, to: V3, rotation: Option<ElementRotation>, faces: &[(Dir, Option<[f64; 4]>, i32)]) -> Element {
+    fn el(
+        from: V3,
+        to: V3,
+        rotation: Option<ElementRotation>,
+        faces: &[(Dir, Option<[f64; 4]>, i32)],
+    ) -> Element {
         Element {
             from,
             to,
@@ -422,7 +453,11 @@ mod tests {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)
     }
 
-    const NONE: VariantRotation = VariantRotation { x: 0, y: 0, uvlock: false };
+    const NONE: VariantRotation = VariantRotation {
+        x: 0,
+        y: 0,
+        uvlock: false,
+    };
 
     #[test]
     fn every_face_of_a_cube_is_counter_clockwise_from_outside() {
@@ -431,7 +466,11 @@ mod tests {
         assert_eq!(q.len(), 6);
         for quad in &q {
             let n = quad.face.normal();
-            assert!(close(quad.normal, [n[0] as f32, n[1] as f32, n[2] as f32]), "{:?}", quad.face);
+            assert!(
+                close(quad.normal, [n[0] as f32, n[1] as f32, n[2] as f32]),
+                "{:?}",
+                quad.face
+            );
             // the corners go round the face centre counter-clockwise about the outward normal
             let e1 = sub(quad.pos[1].map(|x| x as f64), quad.pos[0].map(|x| x as f64));
             let e2 = sub(quad.pos[2].map(|x| x as f64), quad.pos[1].map(|x| x as f64));
@@ -460,24 +499,58 @@ mod tests {
     #[test]
     fn texture_orientation_on_the_side_faces() {
         // on a south face, u grows with +X and v grows downward: the top-left corner is (0,16)
-        let q = bake(&el([0.0; 3], [16.0; 3], None, &[(Dir::South, Some([0.0, 0.0, 16.0, 16.0]), 0)]), NONE);
+        let q = bake(
+            &el(
+                [0.0; 3],
+                [16.0; 3],
+                None,
+                &[(Dir::South, Some([0.0, 0.0, 16.0, 16.0]), 0)],
+            ),
+            NONE,
+        );
         assert!(close(q[0].pos[0], [0.0, 1.0, 1.0]));
         assert_eq!(q[0].uv[0], [0.0, 0.0]);
         assert!(close(q[0].pos[2], [1.0, 0.0, 1.0]));
         assert_eq!(q[0].uv[2], [1.0, 1.0]);
         // on a north face u grows toward -X: its top-left corner is at x = 1
-        let q = bake(&el([0.0; 3], [16.0; 3], None, &[(Dir::North, Some([0.0, 0.0, 16.0, 16.0]), 0)]), NONE);
+        let q = bake(
+            &el(
+                [0.0; 3],
+                [16.0; 3],
+                None,
+                &[(Dir::North, Some([0.0, 0.0, 16.0, 16.0]), 0)],
+            ),
+            NONE,
+        );
         assert!(close(q[0].pos[0], [1.0, 1.0, 0.0]));
         assert_eq!(q[0].uv[0], [0.0, 0.0]);
         // on the up face u grows with +X and v with +Z
-        let q = bake(&el([0.0; 3], [16.0; 3], None, &[(Dir::Up, Some([0.0, 0.0, 16.0, 16.0]), 0)]), NONE);
+        let q = bake(
+            &el(
+                [0.0; 3],
+                [16.0; 3],
+                None,
+                &[(Dir::Up, Some([0.0, 0.0, 16.0, 16.0]), 0)],
+            ),
+            NONE,
+        );
         assert!(close(q[0].pos[0], [0.0, 1.0, 0.0]));
         assert!(close(q[0].pos[2], [1.0, 1.0, 1.0]));
     }
 
     #[test]
     fn face_rotation_shifts_the_corner_assignment() {
-        let f = |r| bake(&el([0.0; 3], [16.0; 3], None, &[(Dir::South, Some([0.0, 0.0, 16.0, 16.0]), r)]), NONE);
+        let f = |r| {
+            bake(
+                &el(
+                    [0.0; 3],
+                    [16.0; 3],
+                    None,
+                    &[(Dir::South, Some([0.0, 0.0, 16.0, 16.0]), r)],
+                ),
+                NONE,
+            )
+        };
         // rotation 90: the texture's bottom-left lands on the top-left corner (clockwise quarter turn)
         assert_eq!(f(90)[0].uv[0], [0.0, 1.0]);
         assert_eq!(f(180)[0].uv[0], [1.0, 1.0]);
@@ -486,7 +559,15 @@ mod tests {
 
     #[test]
     fn a_reversed_uv_rectangle_mirrors() {
-        let q = bake(&el([0.0; 3], [16.0; 3], None, &[(Dir::South, Some([16.0, 0.0, 0.0, 16.0]), 0)]), NONE);
+        let q = bake(
+            &el(
+                [0.0; 3],
+                [16.0; 3],
+                None,
+                &[(Dir::South, Some([16.0, 0.0, 0.0, 16.0]), 0)],
+            ),
+            NONE,
+        );
         assert_eq!(q[0].uv[0], [1.0, 0.0]);
         assert_eq!(q[0].uv[2], [0.0, 1.0]);
     }
@@ -494,21 +575,56 @@ mod tests {
     #[test]
     fn variant_y_turns_north_to_east() {
         let e = el([0.0; 3], [16.0; 3], None, &[(Dir::North, None, 0)]);
-        let q = bake(&e, VariantRotation { x: 0, y: 90, uvlock: false });
+        let q = bake(
+            &e,
+            VariantRotation {
+                x: 0,
+                y: 90,
+                uvlock: false,
+            },
+        );
         assert!(close(q[0].normal, [1.0, 0.0, 0.0]), "{:?}", q[0].normal);
-        let q = bake(&e, VariantRotation { x: 0, y: 270, uvlock: false });
+        let q = bake(
+            &e,
+            VariantRotation {
+                x: 0,
+                y: 270,
+                uvlock: false,
+            },
+        );
         assert!(close(q[0].normal, [-1.0, 0.0, 0.0]));
     }
 
     #[test]
     fn variant_x_turns_up_to_north_and_x_comes_first() {
         let e = el([0.0; 3], [16.0; 3], None, &[(Dir::Up, None, 0)]);
-        let q = bake(&e, VariantRotation { x: 90, y: 0, uvlock: false });
+        let q = bake(
+            &e,
+            VariantRotation {
+                x: 90,
+                y: 0,
+                uvlock: false,
+            },
+        );
         assert!(close(q[0].normal, [0.0, 0.0, -1.0]), "{:?}", q[0].normal);
         // a piston facing east: x 90 then y 90 takes up to north, then north to east
-        let q = bake(&e, VariantRotation { x: 90, y: 90, uvlock: false });
+        let q = bake(
+            &e,
+            VariantRotation {
+                x: 90,
+                y: 90,
+                uvlock: false,
+            },
+        );
         assert!(close(q[0].normal, [1.0, 0.0, 0.0]), "{:?}", q[0].normal);
-        let q = bake(&e, VariantRotation { x: 180, y: 0, uvlock: false });
+        let q = bake(
+            &e,
+            VariantRotation {
+                x: 180,
+                y: 0,
+                uvlock: false,
+            },
+        );
         assert!(close(q[0].normal, [0.0, -1.0, 0.0]));
     }
 
@@ -518,8 +634,19 @@ mod tests {
         let e = el([0.0; 3], [16.0; 3], None, &faces);
         for x in [0, 90, 180, 270] {
             for y in [0, 90, 180, 270] {
-                for q in bake(&e, VariantRotation { x, y, uvlock: false }) {
-                    assert!(q.pos.iter().flatten().all(|c| *c == 0.0 || *c == 1.0), "x{x} y{y}: {:?}", q.pos);
+                for q in bake(
+                    &e,
+                    VariantRotation {
+                        x,
+                        y,
+                        uvlock: false,
+                    },
+                ) {
+                    assert!(
+                        q.pos.iter().flatten().all(|c| *c == 0.0 || *c == 1.0),
+                        "x{x} y{y}: {:?}",
+                        q.pos
+                    );
                 }
             }
         }
@@ -531,7 +658,12 @@ mod tests {
         let e = el(
             [12.0, 0.0, 8.0],
             [16.0, 4.0, 8.0],
-            Some(ElementRotation::Axis { origin: [8.0, 8.0, 8.0], axis: Axis::Y, angle: 90.0, rescale: false }),
+            Some(ElementRotation::Axis {
+                origin: [8.0, 8.0, 8.0],
+                axis: Axis::Y,
+                angle: 90.0,
+                rescale: false,
+            }),
             &[(Dir::South, None, 0)],
         );
         let q = bake(&e, NONE);
@@ -545,40 +677,89 @@ mod tests {
         let e = el(
             [0.8, 0.0, 8.0],
             [15.2, 16.0, 8.0],
-            Some(ElementRotation::Axis { origin: [8.0, 8.0, 8.0], axis: Axis::Y, angle: 45.0, rescale: true }),
+            Some(ElementRotation::Axis {
+                origin: [8.0, 8.0, 8.0],
+                axis: Axis::Y,
+                angle: 45.0,
+                rescale: true,
+            }),
             &[(Dir::North, None, 0), (Dir::South, None, 0)],
         );
         let q = bake(&e, NONE);
         for quad in &q {
             let xs: Vec<f32> = quad.pos.iter().map(|p| p[0]).collect();
             let zs: Vec<f32> = quad.pos.iter().map(|p| p[2]).collect();
-            let (xmin, xmax) = (xs.iter().cloned().fold(9.0, f32::min), xs.iter().cloned().fold(-9.0, f32::max));
-            let (zmin, zmax) = (zs.iter().cloned().fold(9.0, f32::min), zs.iter().cloned().fold(-9.0, f32::max));
-            assert!((xmin - 0.05).abs() < 1e-4 && (xmax - 0.95).abs() < 1e-4, "{xmin} {xmax}");
-            assert!((zmin - 0.05).abs() < 1e-4 && (zmax - 0.95).abs() < 1e-4, "{zmin} {zmax}");
+            let (xmin, xmax) = (
+                xs.iter().cloned().fold(9.0, f32::min),
+                xs.iter().cloned().fold(-9.0, f32::max),
+            );
+            let (zmin, zmax) = (
+                zs.iter().cloned().fold(9.0, f32::min),
+                zs.iter().cloned().fold(-9.0, f32::max),
+            );
+            assert!(
+                (xmin - 0.05).abs() < 1e-4 && (xmax - 0.95).abs() < 1e-4,
+                "{xmin} {xmax}"
+            );
+            assert!(
+                (zmin - 0.05).abs() < 1e-4 && (zmax - 0.95).abs() < 1e-4,
+                "{zmin} {zmax}"
+            );
         }
     }
 
     #[test]
     fn euler_rotation_composes_x_y_z() {
-        // 180 about X then 180 about Z is a half turn about Y: (1,0,0) -> (-1,0,0)
+        // 180 about X then 180 about Z is a half turn about Y: the east face (x = 16) goes to x = -16
         let e = el(
             [16.0, 0.0, 0.0],
-            [16.0, 0.0, 0.0],
-            Some(ElementRotation::Euler { origin: [0.0; 3], x: 180.0, y: 0.0, z: 180.0 }),
+            [16.0, 16.0, 16.0],
+            Some(ElementRotation::Euler {
+                origin: [0.0; 3],
+                x: 180.0,
+                y: 0.0,
+                z: 180.0,
+            }),
             &[(Dir::East, None, 0)],
         );
         let q = bake(&e, NONE);
-        assert!(close(q[0].pos[0], [-1.0, 0.0, 0.0]), "{:?}", q[0].pos);
+        assert!(q[0].pos.iter().all(|p| p[0] == -1.0), "{:?}", q[0].pos);
+        assert!(close(q[0].normal, [-1.0, 0.0, 0.0]), "{:?}", q[0].normal);
+        // a single-axis turn of 90 degrees about Y (the order matters for mixed angles, not here)
+        let e = el(
+            [16.0, 0.0, 0.0],
+            [16.0, 16.0, 16.0],
+            Some(ElementRotation::Euler {
+                origin: [0.0; 3],
+                x: 0.0,
+                y: 90.0,
+                z: 0.0,
+            }),
+            &[(Dir::East, None, 0)],
+        );
+        // Ry(90): +X goes to -Z
+        assert!(close(bake(&e, NONE)[0].normal, [0.0, 0.0, -1.0]));
     }
 
     #[test]
     fn uvlock_keeps_the_texture_on_the_world_axes() {
         // a full top face with a full uv: with uvlock, a turn about Y leaves each corner's UV equal
         // to its world position's own (x, z) projection
-        let e = el([0.0; 3], [16.0; 3], None, &[(Dir::Up, Some([0.0, 0.0, 16.0, 16.0]), 0)]);
+        let e = el(
+            [0.0; 3],
+            [16.0; 3],
+            None,
+            &[(Dir::Up, Some([0.0, 0.0, 16.0, 16.0]), 0)],
+        );
         for y in [90, 180, 270] {
-            let q = bake(&e, VariantRotation { x: 0, y, uvlock: true });
+            let q = bake(
+                &e,
+                VariantRotation {
+                    x: 0,
+                    y,
+                    uvlock: true,
+                },
+            );
             for i in 0..4 {
                 let p = q[0].pos[i];
                 assert!(
@@ -589,29 +770,63 @@ mod tests {
                 );
             }
             // without uvlock the texture turns with the block
-            let q = bake(&e, VariantRotation { x: 0, y, uvlock: false });
-            assert!((0..4).any(|i| (q[0].uv[i][0] - q[0].pos[i][0]).abs() > 1e-5 || (q[0].uv[i][1] - q[0].pos[i][2]).abs() > 1e-5));
+            let q = bake(
+                &e,
+                VariantRotation {
+                    x: 0,
+                    y,
+                    uvlock: false,
+                },
+            );
+            assert!((0..4).any(|i| (q[0].uv[i][0] - q[0].pos[i][0]).abs() > 1e-5
+                || (q[0].uv[i][1] - q[0].pos[i][2]).abs() > 1e-5));
         }
     }
 
     #[test]
     fn uvlock_on_a_side_face_that_becomes_another_side() {
         // a south face turned to the west by y = 90: locked UV equals the west plane's projection
-        let e = el([0.0; 3], [16.0; 3], None, &[(Dir::South, Some([0.0, 0.0, 16.0, 16.0]), 0)]);
-        let q = bake(&e, VariantRotation { x: 0, y: 90, uvlock: true });
+        let e = el(
+            [0.0; 3],
+            [16.0; 3],
+            None,
+            &[(Dir::South, Some([0.0, 0.0, 16.0, 16.0]), 0)],
+        );
+        let q = bake(
+            &e,
+            VariantRotation {
+                x: 0,
+                y: 90,
+                uvlock: true,
+            },
+        );
         assert!(close(q[0].normal, [-1.0, 0.0, 0.0]));
         for i in 0..4 {
             let p = q[0].pos[i];
             // west face: u = z, v = 1 - y
-            assert!((q[0].uv[i][0] - p[2]).abs() < 1e-5 && (q[0].uv[i][1] - (1.0 - p[1])).abs() < 1e-5);
+            assert!(
+                (q[0].uv[i][0] - p[2]).abs() < 1e-5 && (q[0].uv[i][1] - (1.0 - p[1])).abs() < 1e-5
+            );
         }
     }
 
     #[test]
     fn uvlock_with_the_identity_is_a_no_op() {
-        let e = el([0.0; 3], [16.0; 3], None, &[(Dir::East, Some([2.0, 3.0, 9.0, 11.0]), 90)]);
+        let e = el(
+            [0.0; 3],
+            [16.0; 3],
+            None,
+            &[(Dir::East, Some([2.0, 3.0, 9.0, 11.0]), 90)],
+        );
         let a = bake(&e, NONE);
-        let b = bake(&e, VariantRotation { x: 0, y: 0, uvlock: true });
+        let b = bake(
+            &e,
+            VariantRotation {
+                x: 0,
+                y: 0,
+                uvlock: true,
+            },
+        );
         assert_eq!(a, b);
     }
 
@@ -619,7 +834,14 @@ mod tests {
     fn cullface_follows_the_rotation() {
         let mut e = el([0.0; 3], [16.0; 3], None, &[(Dir::North, None, 0)]);
         e.faces[0].1.cullface = Some(Dir::North);
-        let q = bake(&e, VariantRotation { x: 0, y: 90, uvlock: false });
+        let q = bake(
+            &e,
+            VariantRotation {
+                x: 0,
+                y: 90,
+                uvlock: false,
+            },
+        );
         assert_eq!(q[0].cullface, Some(Dir::East));
         assert_eq!(q[0].face, Dir::North);
     }
@@ -627,11 +849,28 @@ mod tests {
     #[test]
     fn flat_elements_keep_a_direction_normal() {
         // the redstone-dust plane: zero thickness, up and down faces only
-        let e = el([0.0, 0.25, 0.0], [16.0, 0.25, 16.0], None, &[(Dir::Up, Some([0.0, 0.0, 16.0, 16.0]), 0), (Dir::Down, Some([0.0, 16.0, 16.0, 0.0]), 0)]);
+        let e = el(
+            [0.0, 0.25, 0.0],
+            [16.0, 0.25, 16.0],
+            None,
+            &[
+                (Dir::Up, Some([0.0, 0.0, 16.0, 16.0]), 0),
+                (Dir::Down, Some([0.0, 16.0, 16.0, 0.0]), 0),
+            ],
+        );
         let q = bake(&e, NONE);
         assert!(close(q[0].normal, [0.0, 1.0, 0.0]));
         assert!(close(q[1].normal, [0.0, -1.0, 0.0]));
         assert!(q[0].pos.iter().all(|p| (p[1] - 0.015625).abs() < 1e-6));
+    }
+
+    #[test]
+    fn faces_without_area_are_not_emitted() {
+        // a flat plane written with a face for every side: only the two that have area are drawn
+        let faces: Vec<_> = Dir::ALL.iter().map(|d| (*d, None, 0)).collect();
+        let q = bake(&el([0.0, 0.0, 8.0], [16.0, 16.0, 8.0], None, &faces), NONE);
+        let dirs: Vec<Dir> = q.iter().map(|q| q.face).collect();
+        assert_eq!(dirs, vec![Dir::North, Dir::South]);
     }
 
     #[test]

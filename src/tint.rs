@@ -256,8 +256,14 @@ mod tests {
     #[test]
     fn colours_from_data() {
         // the signed ARGB of an item tint
-        assert_eq!(color_from_json(&serde_json::json!(-12012264)), Some([0x48, 0xB5, 0x18]));
-        assert_eq!(color_from_json(&serde_json::json!("#3f76e4")), Some([0x3f, 0x76, 0xe4]));
+        assert_eq!(
+            color_from_json(&serde_json::json!(-12012264)),
+            Some([0x48, 0xB5, 0x18])
+        );
+        assert_eq!(
+            color_from_json(&serde_json::json!("#3f76e4")),
+            Some([0x3f, 0x76, 0xe4])
+        );
         assert_eq!(parse_rgb("0x00ff80").unwrap(), [0, 255, 128]);
         assert!(parse_rgb("fff").is_err());
     }

@@ -65,6 +65,9 @@ enum Cmd {
         /// Put the origin at the block's corner (the game's frame) instead of its bottom centre
         #[arg(long)]
         corner_origin: bool,
+        /// File name (without extension) for the output; the id with `_` for punctuation by default
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Write a texture (and with `--frames` every frame of an animated one) as PNG
     Texture {
@@ -146,7 +149,10 @@ fn one_assets(cli: &Cli) -> Result<Assets> {
     for j in jars.iter().rev() {
         if let Ok(a) = Assets::open(&j.path) {
             if a.version().support() == Support::Full {
-                eprintln!("(reading Minecraft {}; --mc-version picks another)", a.version().id);
+                eprintln!(
+                    "(reading Minecraft {}; --mc-version picks another)",
+                    a.version().id
+                );
                 return Ok(a);
             }
         }
@@ -156,7 +162,10 @@ fn one_assets(cli: &Cli) -> Result<Assets> {
 
 fn cmd_versions(cli: &Cli) -> Result<()> {
     let jars = selected_jars(cli)?;
-    println!("{:<8} {:<17} {:<14} {:<7}  note", "version", "source", "support", "id from");
+    println!(
+        "{:<8} {:<17} {:<14} {:<7}  note",
+        "version", "source", "support", "id from"
+    );
     for j in jars {
         match Assets::open(&j.path) {
             Ok(a) => {
@@ -254,7 +263,10 @@ fn print_states(a: &Assets, name: &str) -> Result<()> {
         }
     } else {
         for (p, vs) in bs.property_values() {
-            println!("    {p}: {}", vs.into_iter().collect::<Vec<_>>().join(" | "));
+            println!(
+                "    {p}: {}",
+                vs.into_iter().collect::<Vec<_>>().join(" | ")
+            );
         }
     }
     Ok(())
@@ -264,10 +276,14 @@ fn parse_tint(a: &Assets, spec: &str) -> Result<(u32, Tint)> {
     let (idx, what) = spec
         .split_once('=')
         .ok_or_else(|| anyhow!("--tint {spec}: expected INDEX=COLOUR"))?;
-    let idx: u32 = idx.trim().parse().with_context(|| format!("tint index {idx:?}"))?;
+    let idx: u32 = idx
+        .trim()
+        .parse()
+        .with_context(|| format!("tint index {idx:?}"))?;
     let what = what.trim();
     if let Some((kind, rest)) = what.split_once(':') {
-        let kind = ColormapKind::parse(kind).ok_or_else(|| anyhow!("{kind:?}: grass, foliage or dry_foliage"))?;
+        let kind = ColormapKind::parse(kind)
+            .ok_or_else(|| anyhow!("{kind:?}: grass, foliage or dry_foliage"))?;
         let (t, d) = rest
             .split_once(',')
             .ok_or_else(|| anyhow!("{what}: expected {}:TEMPERATURE,DOWNFALL", kind.name()))?;
@@ -281,7 +297,8 @@ fn parse_tint(a: &Assets, spec: &str) -> Result<(u32, Tint)> {
         ));
     }
     if let Some((kind, biome)) = what.split_once('@') {
-        let kind = ColormapKind::parse(kind).ok_or_else(|| anyhow!("{kind:?}: grass, foliage or dry_foliage"))?;
+        let kind = ColormapKind::parse(kind)
+            .ok_or_else(|| anyhow!("{kind:?}: grass, foliage or dry_foliage"))?;
         let (t, notes) = a.tint_for_biome(kind, biome)?;
         for n in notes {
             eprintln!("note: {n}");
@@ -293,7 +310,13 @@ fn parse_tint(a: &Assets, spec: &str) -> Result<(u32, Tint)> {
 
 fn file_name_for(id: &str) -> String {
     id.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -304,6 +327,7 @@ fn cmd_model(
     frame: u32,
     tints: Vec<String>,
     corner_origin: bool,
+    name: Option<String>,
 ) -> Result<()> {
     let baked = a.bake_id(&id)?;
     for n in &baked.report.notes {
@@ -327,10 +351,14 @@ fn cmd_model(
     let opts = MeshOptions {
         frame,
         tints: set,
-        origin: if corner_origin { Origin::BlockCorner } else { Origin::BottomCentre },
+        origin: if corner_origin {
+            Origin::BlockCorner
+        } else {
+            Origin::BottomCentre
+        },
     };
     let groups = mesh::build(&a, &baked, &opts)?;
-    let name = file_name_for(&id);
+    let name = name.unwrap_or_else(|| file_name_for(&id));
     let path = gltf::write(&baked, &groups, &name, &out)?;
     println!(
         "{id}: {} quads, {} materials -> {}",
@@ -387,7 +415,8 @@ fn cmd_tint(
     downfall: Option<f64>,
     biome: Option<String>,
 ) -> Result<()> {
-    let kind = ColormapKind::parse(&kind).ok_or_else(|| anyhow!("{kind:?}: grass, foliage or dry_foliage"))?;
+    let kind = ColormapKind::parse(&kind)
+        .ok_or_else(|| anyhow!("{kind:?}: grass, foliage or dry_foliage"))?;
     let tint = match (&biome, temperature, downfall) {
         (Some(b), None, None) => {
             let (t, notes) = a.tint_for_biome(kind, b)?;
@@ -404,7 +433,10 @@ fn cmd_tint(
         _ => bail!("give --biome <name>, or both --temperature and --downfall"),
     };
     let c = a.tint_rgb(&tint)?;
-    println!("#{:02x}{:02x}{:02x}  rgb({}, {}, {})", c[0], c[1], c[2], c[0], c[1], c[2]);
+    println!(
+        "#{:02x}{:02x}{:02x}  rgb({}, {}, {})",
+        c[0], c[1], c[2], c[0], c[1], c[2]
+    );
     Ok(())
 }
 
@@ -424,20 +456,33 @@ fn cmd_check(cli: &Cli, verbose: bool) -> Result<bool> {
             }
         };
         let v = a.version();
-        println!("== Minecraft {} ({}) - {}", v.id, j.source.name(), v.layout.name());
+        println!(
+            "== Minecraft {} ({}) - {}",
+            v.id,
+            j.source.name(),
+            v.layout.name()
+        );
         match check::run(&a) {
             Err(e) => println!("   {e:#}"),
             Ok(r) => {
                 if v.support() == Support::TexturesOnly {
                     println!("   textures only: {}", v.support_note());
                 }
-                println!("   textures      {}  ({} animated)", fmt_count(r.textures), r.animated_textures);
+                println!(
+                    "   textures      {}  ({} animated)",
+                    fmt_count(r.textures),
+                    r.animated_textures
+                );
                 println!("   .mcmeta       {}", fmt_count(r.mcmetas));
                 println!("   colormaps     {}", fmt_count(r.colormaps));
                 if v.layout.has_json_models() {
                     println!("   blockstates   {}", fmt_count(r.blockstates));
                     println!("   block models  {}", fmt_count(r.block_models));
-                    println!("   item models   {}  ({} templates)", fmt_count(r.item_models), r.item_templates);
+                    println!(
+                        "   item models   {}  ({} templates)",
+                        fmt_count(r.item_models),
+                        r.item_templates
+                    );
                     if r.item_defs.ok + r.item_defs.failed > 0 {
                         println!("   item defs     {}", fmt_count(r.item_defs));
                     }
@@ -459,6 +504,9 @@ fn cmd_check(cli: &Cli, verbose: bool) -> Result<bool> {
                 }
                 for f in &r.failures {
                     println!("   FAIL {f}");
+                }
+                for f in &r.upstream_defects {
+                    println!("   upstream defect (not a failure): {f}");
                 }
                 println!("   failures: {}  ({:.1} s)", r.total_failed(), r.seconds);
                 total_failed += r.total_failed();
@@ -498,7 +546,11 @@ fn cmd_check_bridge(cli: &Cli) -> Result<bool> {
             match mc.load_report(&info.id) {
                 Ok((m, r)) => {
                     ok += 1;
-                    tris += m.meshes.iter().map(|x| x.indices.len() as u64 / 3).sum::<u64>();
+                    tris += m
+                        .meshes
+                        .iter()
+                        .map(|x| x.indices.len() as u64 / 3)
+                        .sum::<u64>();
                     mats += r.materials as u64;
                     // the loaded model must be 1 block wide at most unless the data says otherwise
                     if let Some((lo, hi)) = m.bounds() {
@@ -535,6 +587,11 @@ fn cmd_check_bridge(cli: &Cli) -> Result<bool> {
 }
 
 fn main() {
+    // Die quietly when the reader of our output goes away (`list | head`)
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let cli = Cli::parse();
     let res: Result<bool> = (|| match &cli.cmd {
         Cmd::Versions => cmd_versions(&cli).map(|_| true),
@@ -544,16 +601,34 @@ fn main() {
             items,
             states,
             left_out,
-        } => cmd_list(one_assets(&cli)?, filter.clone(), *blocks, *items, *states, *left_out).map(|_| true),
+        } => cmd_list(
+            one_assets(&cli)?,
+            filter.clone(),
+            *blocks,
+            *items,
+            *states,
+            *left_out,
+        )
+        .map(|_| true),
         Cmd::Model {
             id,
             out,
             frame,
             tints,
             corner_origin,
+            name,
         } => {
             let _ = AssetId::parse(id)?;
-            cmd_model(one_assets(&cli)?, id.clone(), out.clone(), *frame, tints.clone(), *corner_origin).map(|_| true)
+            cmd_model(
+                one_assets(&cli)?,
+                id.clone(),
+                out.clone(),
+                *frame,
+                tints.clone(),
+                *corner_origin,
+                name.clone(),
+            )
+            .map(|_| true)
         }
         Cmd::Texture { path, out, frames } => {
             cmd_texture(one_assets(&cli)?, path.clone(), out.clone(), *frames).map(|_| true)
@@ -563,7 +638,14 @@ fn main() {
             temperature,
             downfall,
             biome,
-        } => cmd_tint(one_assets(&cli)?, kind.clone(), *temperature, *downfall, biome.clone()).map(|_| true),
+        } => cmd_tint(
+            one_assets(&cli)?,
+            kind.clone(),
+            *temperature,
+            *downfall,
+            biome.clone(),
+        )
+        .map(|_| true),
         Cmd::Check { verbose } => cmd_check(&cli, *verbose),
         #[cfg(feature = "bridge")]
         Cmd::CheckBridge => cmd_check_bridge(&cli),

@@ -120,7 +120,10 @@ impl BlockState {
                 bail!("`variants` is not an object");
             };
             for (k, c) in m {
-                variants.push((k.clone(), parse_choice(c).with_context(|| format!("variant {k:?}"))?));
+                variants.push((
+                    k.clone(),
+                    parse_choice(c).with_context(|| format!("variant {k:?}"))?,
+                ));
             }
         }
         let mut multipart = Vec::new();
@@ -147,7 +150,10 @@ impl BlockState {
         if variants.is_empty() && multipart.is_empty() {
             bail!("neither `variants` nor `multipart`");
         }
-        Ok(BlockState { variants, multipart })
+        Ok(BlockState {
+            variants,
+            multipart,
+        })
     }
 
     pub fn is_multipart(&self) -> bool {
@@ -289,10 +295,9 @@ impl BlockState {
                         continue;
                     }
                     let ks = State::parse(&e.0)?;
-                    let agrees = ks
-                        .0
-                        .iter()
-                        .all(|(k, v)| state.0.get(k).is_none_or(|sv| sv == v));
+                    let agrees =
+                        ks.0.iter()
+                            .all(|(k, v)| state.0.get(k).is_none_or(|sv| sv == v));
                     // A key with no property in common with the state would "agree" with anything
                     let shares = ks.0.is_empty() || ks.0.keys().any(|k| state.0.contains_key(k));
                     if agrees && shares {
@@ -393,7 +398,10 @@ fn parse_when(v: &Value) -> Result<When> {
         bail!("`when` is not an object");
     };
     if o.len() == 1 {
-        for (key, ctor) in [("OR", When::Or as fn(Vec<When>) -> When), ("AND", When::And)] {
+        for (key, ctor) in [
+            ("OR", When::Or as fn(Vec<When>) -> When),
+            ("AND", When::And),
+        ] {
             if let Some(list) = o.get(key) {
                 let Some(a) = list.as_array() else {
                     bail!("`{key}` is not a list");
@@ -445,11 +453,15 @@ mod tests {
     #[test]
     fn variants_pick_by_state() {
         let b = BlockState::parse(STAIRS).unwrap();
-        let s = b.select(&State::parse("facing=west,half=bottom").unwrap()).unwrap();
+        let s = b
+            .select(&State::parse("facing=west,half=bottom").unwrap())
+            .unwrap();
         assert_eq!(s.chosen[0].y, 180);
         assert!(s.chosen[0].uvlock);
         assert_eq!(s.candidates, 1);
-        let s = b.select(&State::parse("half=top,facing=east").unwrap()).unwrap();
+        let s = b
+            .select(&State::parse("half=top,facing=east").unwrap())
+            .unwrap();
         assert_eq!(s.chosen[0].x, 180);
     }
 
@@ -480,11 +492,14 @@ mod tests {
 
     #[test]
     fn empty_state_prefers_the_empty_or_normal_key() {
-        let b = BlockState::parse(r#"{"variants":{"a=1":{"model":"m1"},"":{"model":"m2"}}}"#).unwrap();
+        let b =
+            BlockState::parse(r#"{"variants":{"a=1":{"model":"m1"},"":{"model":"m2"}}}"#).unwrap();
         assert_eq!(b.select(&State::default()).unwrap().chosen[0].model, "m2");
-        let n = BlockState::parse(r#"{"variants":{"a=1":{"model":"m1"},"normal":{"model":"m3"}}}"#).unwrap();
+        let n = BlockState::parse(r#"{"variants":{"a=1":{"model":"m1"},"normal":{"model":"m3"}}}"#)
+            .unwrap();
         assert_eq!(n.select(&State::default()).unwrap().chosen[0].model, "m3");
-        let f = BlockState::parse(r#"{"variants":{"a=1":{"model":"m1"},"a=2":{"model":"m4"}}}"#).unwrap();
+        let f = BlockState::parse(r#"{"variants":{"a=1":{"model":"m1"},"a=2":{"model":"m4"}}}"#)
+            .unwrap();
         assert_eq!(f.select(&State::default()).unwrap().chosen[0].model, "m1");
     }
 
@@ -519,9 +534,15 @@ mod tests {
                 .collect()
         };
         assert_eq!(m(""), vec!["post0", "notTop0"]);
-        assert_eq!(m("north=true,east=true"), vec!["post0", "side0", "side90", "notTop0"]);
+        assert_eq!(
+            m("north=true,east=true"),
+            vec!["post0", "side0", "side90", "notTop0"]
+        );
         assert_eq!(m("north=false,east=false,half=top"), vec!["post0", "lone0"]);
-        assert_eq!(m("south=true,half=bottom"), vec!["post0", "lone0", "notTop0"]);
+        assert_eq!(
+            m("south=true,half=bottom"),
+            vec!["post0", "lone0", "notTop0"]
+        );
     }
 
     #[test]
@@ -530,8 +551,20 @@ mod tests {
             r#"{"multipart":[{"when":{"north":"side|up"},"apply":{"model":"s"}}]}"#,
         )
         .unwrap();
-        assert_eq!(b.select(&State::parse("north=up").unwrap()).unwrap().chosen.len(), 1);
-        assert_eq!(b.select(&State::parse("north=none").unwrap()).unwrap().chosen.len(), 0);
+        assert_eq!(
+            b.select(&State::parse("north=up").unwrap())
+                .unwrap()
+                .chosen
+                .len(),
+            1
+        );
+        assert_eq!(
+            b.select(&State::parse("north=none").unwrap())
+                .unwrap()
+                .chosen
+                .len(),
+            0
+        );
     }
 
     #[test]

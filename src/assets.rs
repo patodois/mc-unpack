@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -41,6 +41,9 @@ pub enum LeftOut {
     NoElements,
     /// A multipart blockstate whose parts all depend on properties the state did not give
     NoPartMatched,
+    /// Every face names a texture that cannot exist, so the game would draw only its built-in
+    /// missing-texture pattern (Mojang's `heavy_core` model writes `all` where `#all` was meant)
+    MissingTexture,
     /// A model other models inherit from (`item/generated`, `item/handheld`): no texture of its own
     Template,
 }
@@ -59,6 +62,10 @@ impl std::fmt::Display for LeftOut {
                 "the data has no geometry for it (invisible, or drawn by the game's code: a block entity or an entity)"
             ),
             LeftOut::NoPartMatched => write!(f, "no part of the blockstate matches the given state"),
+            LeftOut::MissingTexture => write!(
+                f,
+                "every face names a texture that does not exist; the game draws its built-in missing-texture pattern (code, not data)"
+            ),
             LeftOut::Template => write!(f, "a template other models inherit from, not an item"),
         }
     }
@@ -109,8 +116,13 @@ impl BakedModel {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AssetId {
-    Block { name: String, variant: Option<String> },
-    Item { name: String },
+    Block {
+        name: String,
+        variant: Option<String>,
+    },
+    Item {
+        name: String,
+    },
 }
 
 impl AssetId {
@@ -141,7 +153,9 @@ impl AssetId {
             if variant.is_some() {
                 bail!("{id}: items have no variants");
             }
-            Ok(AssetId::Item { name: n.to_string() })
+            Ok(AssetId::Item {
+                name: n.to_string(),
+            })
         } else {
             bail!("{id}: ids are `block/<name>[?variant=<state>]` and `item/<name>`")
         }
@@ -156,6 +170,17 @@ pub struct Assets {
     resolved: Mutex<HashMap<String, Arc<ResolvedModel>>>,
     textures: Mutex<HashMap<String, Arc<Texture>>>,
     colormaps: Mutex<HashMap<ColormapKind, Arc<Colormap>>>,
+    permutations: OnceLock<HashMap<String, PermSource>>,
+}
+
+/// A texture the game generates when it builds an atlas (`atlases/*.json`, source type
+/// `paletted_permutations`): a base texture whose palette-key colours are swapped for another
+/// palette's. The armor trims on items are these.
+#[derive(Clone, Debug, PartialEq)]
+struct PermSource {
+    base: String,
+    palette_key: String,
+    palette: String,
 }
 
 impl Assets {
@@ -175,9 +200,10 @@ impl Assets {
     }
 
     fn finish(jar: Jar, version: VersionInfo, path: &Path) -> Result<Assets> {
-        if jar.names_under("assets/minecraft/").next().is_none() {
+        // 1.2.5 keeps its art on atlas sheets at the jar's root and has no assets folder
+        if jar.names_under("assets/minecraft/").next().is_none() && !jar.contains("terrain.png") {
             bail!(
-                "{} has no assets/minecraft folder: it is not a Minecraft client jar (a modded profile's jar, or a server jar?)",
+                "{} has no assets/minecraft folder and no terrain.png: it is not a Minecraft client jar (a modded profile's jar, or a server jar?)",
                 path.display()
             );
         }
@@ -189,6 +215,7 @@ impl Assets {
             resolved: Mutex::new(HashMap::new()),
             textures: Mutex::new(HashMap::new()),
             colormaps: Mutex::new(HashMap::new()),
+            permutations: OnceLock::new(),
         })
     }
 
@@ -276,7 +303,10 @@ impl Assets {
         let path = format!("{ROOT}/models/{id}.json");
         let text = self.jar.read_string(&path)?;
         let m = Arc::new(RawModel::parse(&text).with_context(|| path.clone())?);
-        self.raw_models.lock().unwrap().insert(id.to_string(), m.clone());
+        self.raw_models
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), m.clone());
         Ok(m)
     }
 
@@ -303,7 +333,11 @@ impl Assets {
 
     // ---- textures ----
 
-    /// A texture by its path relative to `textures/` (`block/stone`), with its `.mcmeta`
+    /// A texture by its path relative to `textures/` (`block/stone`), with its `.mcmeta`.
+    ///
+    /// A path the jar has no PNG for may be one the game generates from an atlas definition (the
+    /// armor-trim item layers, `trims/items/boots_trim_amethyst`): those are produced here the same
+    /// way, from the base texture and the palettes.
     pub fn texture(&self, path: &str) -> Result<Arc<Texture>> {
         let path = normalize_location(path)?;
         if let Some(t) = self.textures.lock().unwrap().get(&path) {
@@ -311,12 +345,23 @@ impl Assets {
         }
         let entry = format!("{ROOT}/textures/{path}.png");
         if !self.jar.contains(&entry) {
+            if let Some(src) = self.permutations().get(&path) {
+                let t = Arc::new(
+                    self.permute(src)
+                        .with_context(|| format!("generating {path}"))?,
+                );
+                self.textures.lock().unwrap().insert(path, t.clone());
+                return Ok(t);
+            }
             bail!("no texture `{path}` in Minecraft {}", self.version.id);
         }
         let img = decode_png(&self.jar.read(&entry)?).with_context(|| entry.clone())?;
         let meta_entry = format!("{entry}.mcmeta");
         let meta = if self.jar.contains(&meta_entry) {
-            Some(McMeta::parse(&self.jar.read_string(&meta_entry)?).with_context(|| meta_entry.clone())?)
+            Some(
+                McMeta::parse(&self.jar.read_string(&meta_entry)?)
+                    .with_context(|| meta_entry.clone())?,
+            )
         } else {
             None
         };
@@ -325,9 +370,101 @@ impl Assets {
         Ok(t)
     }
 
+    fn permutations(&self) -> &HashMap<String, PermSource> {
+        self.permutations.get_or_init(|| {
+            let mut out = HashMap::new();
+            let prefix = format!("{ROOT}/atlases/");
+            for n in self
+                .jar
+                .names_under(&prefix)
+                .filter(|n| n.ends_with(".json"))
+            {
+                let Ok(text) = self.jar.read_string(n) else {
+                    continue;
+                };
+                let Ok(v) = serde_json::from_str::<Value>(&text) else {
+                    continue;
+                };
+                let Some(sources) = v.get("sources").and_then(|s| s.as_array()) else {
+                    continue;
+                };
+                for s in sources {
+                    let ty = s.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    if ty.strip_prefix("minecraft:").unwrap_or(ty) != "paletted_permutations" {
+                        continue;
+                    }
+                    let (Some(key), Some(perms), Some(texs)) = (
+                        s.get("palette_key").and_then(|k| k.as_str()),
+                        s.get("permutations").and_then(|p| p.as_object()),
+                        s.get("textures").and_then(|t| t.as_array()),
+                    ) else {
+                        continue;
+                    };
+                    let sep = s.get("separator").and_then(|x| x.as_str()).unwrap_or("_");
+                    for t in texs.iter().filter_map(|t| t.as_str()) {
+                        for (name, palette) in perms {
+                            let Some(pal) = palette.as_str() else {
+                                continue;
+                            };
+                            out.insert(
+                                format!("{}{sep}{name}", t.strip_prefix("minecraft:").unwrap_or(t)),
+                                PermSource {
+                                    base: t.strip_prefix("minecraft:").unwrap_or(t).to_string(),
+                                    palette_key: key
+                                        .strip_prefix("minecraft:")
+                                        .unwrap_or(key)
+                                        .to_string(),
+                                    palette: pal
+                                        .strip_prefix("minecraft:")
+                                        .unwrap_or(pal)
+                                        .to_string(),
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            out
+        })
+    }
+
+    fn permute(&self, src: &PermSource) -> Result<Texture> {
+        let load = |p: &str| -> Result<crate::texture::Rgba> {
+            decode_png(&self.jar.read(&format!("{ROOT}/textures/{p}.png"))?)
+                .with_context(|| p.to_string())
+        };
+        let (key, pal, mut img) = (
+            load(&src.palette_key)?,
+            load(&src.palette)?,
+            load(&src.base)?,
+        );
+        let n = (key.width * key.height).min(pal.width * pal.height) as usize;
+        // palette key colour -> replacement colour, by position in the two palettes
+        let map: Vec<([u8; 3], [u8; 4])> = (0..n)
+            .map(|i| {
+                let k = &key.data[i * 4..i * 4 + 3];
+                let p = &pal.data[i * 4..i * 4 + 4];
+                ([k[0], k[1], k[2]], [p[0], p[1], p[2], p[3]])
+            })
+            .collect();
+        for px in img.data.chunks_exact_mut(4) {
+            if px[3] == 0 {
+                continue;
+            }
+            if let Some((_, to)) = map.iter().find(|(k, _)| k[..] == px[..3]) {
+                px[..3].copy_from_slice(&to[..3]);
+                px[3] = ((px[3] as u32 * to[3] as u32) / 255) as u8;
+            }
+        }
+        Texture::new(img, None)
+    }
+
     pub fn has_texture(&self, path: &str) -> bool {
         normalize_location(path)
-            .map(|p| self.jar.contains(&format!("{ROOT}/textures/{p}.png")))
+            .map(|p| {
+                self.jar.contains(&format!("{ROOT}/textures/{p}.png"))
+                    || self.permutations().contains_key(&p)
+            })
             .unwrap_or(false)
     }
 
@@ -346,7 +483,11 @@ impl Assets {
         }
         let entry = kind.file();
         if !self.jar.contains(entry) {
-            bail!("Minecraft {} has no {} colormap", self.version.id, kind.name());
+            bail!(
+                "Minecraft {} has no {} colormap",
+                self.version.id,
+                kind.name()
+            );
         }
         let c = Arc::new(Colormap::new(decode_png(&self.jar.read(entry)?)?)?);
         self.colormaps.lock().unwrap().insert(kind, c.clone());
@@ -403,6 +544,27 @@ impl Assets {
         }
     }
 
+    /// `Some(MissingTexture)` when no face of the model names a texture that can exist
+    fn unnameable_only(&self, m: &ResolvedModel) -> Option<LeftOut> {
+        if m.builtin.is_some() || m.elements.is_empty() {
+            return None;
+        }
+        let any = m
+            .elements
+            .iter()
+            .flat_map(|e| e.faces.iter())
+            .any(|(_, f)| {
+                m.texture(&f.texture)
+                    .map(|t| t.path.contains('/') || self.has_texture(&t.path))
+                    .unwrap_or(true)
+            });
+        if any {
+            None
+        } else {
+            Some(LeftOut::MissingTexture)
+        }
+    }
+
     /// Bakes what an id names: `block/<name>[?variant=<state>]` or `item/<name>`
     pub fn bake_id(&self, id: &str) -> Result<BakedModel> {
         match AssetId::parse(id)? {
@@ -446,6 +608,24 @@ impl Assets {
         ))
     }
 
+    /// Drops the quads whose texture name has no folder (`all` where `#all` was meant, as in
+    /// Mojang's `heavy_core` model): such a texture cannot exist, and the game draws its built-in
+    /// missing-texture pattern there, which is code and not data. Returns the names dropped.
+    fn drop_unnameable(&self, quads: &mut Vec<Quad>) -> Vec<String> {
+        let mut dropped = Vec::new();
+        quads.retain(|q| {
+            if q.texture.contains('/') || self.has_texture(&q.texture) {
+                true
+            } else {
+                if !dropped.contains(&q.texture) {
+                    dropped.push(q.texture.clone());
+                }
+                false
+            }
+        });
+        dropped
+    }
+
     /// Bakes a block in a state. An empty `state` takes the blockstate file's first/`normal`
     /// variant (see [`BlockState::select`]).
     pub fn bake_block(&self, name: &str, state: &State) -> Result<BakedModel> {
@@ -473,10 +653,19 @@ impl Assets {
             ));
         }
         if sel.candidates > 1 {
-            report.notes.push(format!(
-                "the state fits {} variants; the first in the file was used",
-                sel.candidates
-            ));
+            report.notes.push(if state.is_empty() {
+                format!(
+                    "no state given: used the entry `{}`, the file's `normal`/empty one or else its first of {}",
+                    sel.key.clone().unwrap_or_default(),
+                    sel.candidates
+                )
+            } else {
+                format!(
+                    "the state fits {} variants; the first in the file was used (`{}`)",
+                    sel.candidates,
+                    sel.key.clone().unwrap_or_default()
+                )
+            });
         }
         let mut parts = Vec::new();
         let mut first_left_out = None;
@@ -487,7 +676,7 @@ impl Assets {
                 first_left_out.get_or_insert(lo);
                 continue;
             }
-            let quads = bake_model(
+            let mut quads = bake_model(
                 &m,
                 VariantRotation {
                     x: v.x,
@@ -495,11 +684,22 @@ impl Assets {
                     uvlock: v.uvlock,
                 },
             )?;
-            parts.push(Part {
-                model: id,
-                quads,
-                tints: TintSet::new(),
-            });
+            let before = quads.len();
+            for t in self.drop_unnameable(&mut quads) {
+                if quads.is_empty() && before > 0 {
+                    first_left_out.get_or_insert(LeftOut::MissingTexture);
+                }
+                report.notes.push(format!(
+                    "{id}: faces that name texture `{t}` were left out (no such texture; the game draws its built-in missing-texture pattern)"
+                ));
+            }
+            if !quads.is_empty() {
+                parts.push(Part {
+                    model: id,
+                    quads,
+                    tints: TintSet::new(),
+                });
+            }
         }
         if parts.is_empty() {
             report.left_out = Some(if sel.chosen.is_empty() {
@@ -538,7 +738,10 @@ impl Assets {
     pub fn item_definition(&self, name: &str) -> Result<Value> {
         let path = format!("{ROOT}/items/{name}.json");
         if !self.jar.contains(&path) {
-            bail!("no item definition `{name}` in Minecraft {}", self.version.id);
+            bail!(
+                "no item definition `{name}` in Minecraft {}",
+                self.version.id
+            );
         }
         serde_json::from_str(&self.jar.read_string(&path)?).with_context(|| path)
     }
@@ -551,7 +754,10 @@ impl Assets {
         if self.layout() == Layout::ModelsWithItemDefs {
             Ok(item::default_models(&self.item_definition(&name)?))
         } else {
-            if !self.jar.contains(&format!("{ROOT}/models/item/{name}.json")) {
+            if !self
+                .jar
+                .contains(&format!("{ROOT}/models/item/{name}.json"))
+            {
                 bail!("no item model `{name}` in Minecraft {}", self.version.id);
             }
             Ok(DefaultModels {
@@ -566,7 +772,7 @@ impl Assets {
 
     /// Bakes one item model (a path relative to `models/`): the generated flat mesh, or its
     /// elements like any block model
-    pub fn bake_item_model(&self, model_id: &str) -> Result<Vec<Quad>> {
+    pub fn bake_item_model(&self, model_id: &str) -> Result<(Vec<Quad>, Vec<String>)> {
         let m = self.model(model_id)?;
         match m.builtin {
             Some(Builtin::Generated) => {
@@ -594,15 +800,28 @@ impl Assets {
                         )?;
                     }
                 }
-                Ok(quads)
+                Ok((quads, Vec::new()))
             }
             Some(Builtin::Entity) => bail!("{}: {}", m.id, LeftOut::BuiltinEntity),
-            Some(Builtin::Other(ref o)) => bail!("{}: built-in root `builtin/{o}` is not data", m.id),
+            Some(Builtin::Other(ref o)) => {
+                bail!("{}: built-in root `builtin/{o}` is not data", m.id)
+            }
             None => {
                 if m.elements.is_empty() {
                     bail!("{}: {}", m.id, LeftOut::NoElements);
                 }
-                bake_model(&m, VariantRotation::default())
+                let mut quads = bake_model(&m, VariantRotation::default())?;
+                let notes = self
+                    .drop_unnameable(&mut quads)
+                    .into_iter()
+                    .map(|t| {
+                        format!(
+                            "{}: faces that name texture `{t}` were left out (no such texture; the game draws its built-in missing-texture pattern)",
+                            m.id
+                        )
+                    })
+                    .collect();
+                Ok((quads, notes))
             }
         }
     }
@@ -617,21 +836,27 @@ impl Assets {
         };
         let mut parts = Vec::new();
         let mut first_err = None;
+        let mut missing_texture = false;
         for r in &def.models {
             let id = normalize_location(&r.model)?;
             match self.bake_item_model(&id) {
-                Ok(quads) => {
+                Ok((quads, notes)) => {
+                    report.notes.extend(notes);
                     let mut tints = TintSet::new();
                     for (i, t) in r.tints.iter().enumerate() {
                         if let Some(t) = t.to_tint() {
                             tints.0.insert(i as u32, t);
                         }
                     }
-                    parts.push(Part {
-                        model: id,
-                        quads,
-                        tints,
-                    });
+                    if quads.is_empty() {
+                        missing_texture = true;
+                    } else {
+                        parts.push(Part {
+                            model: id,
+                            quads,
+                            tints,
+                        });
+                    }
                 }
                 Err(e) => {
                     first_err.get_or_insert(e);
@@ -641,6 +866,8 @@ impl Assets {
         if parts.is_empty() {
             if !def.special.is_empty() {
                 report.left_out = Some(LeftOut::SpecialItem(def.special.clone()));
+            } else if missing_texture {
+                report.left_out = Some(LeftOut::MissingTexture);
             } else if let Some(e) = first_err {
                 // `builtin/entity` items and models without geometry are "left out"; anything
                 // else (a missing texture) is a real failure
@@ -672,7 +899,7 @@ impl Assets {
         let mut first = None;
         for v in bs.all_variants() {
             let m = self.model(&self.variant_model_id(&v.model)?)?;
-            match self.left_out_of(&m) {
+            match self.left_out_of(&m).or_else(|| self.unnameable_only(&m)) {
                 None => return Ok(None),
                 Some(lo) => {
                     first.get_or_insert(lo);
@@ -681,8 +908,13 @@ impl Assets {
         }
         let mut lo = first.unwrap_or(LeftOut::NoElements);
         if lo == LeftOut::NoElements {
+            // the block of the same name as an item the game draws in code is a block entity
             if let Some(s) = self.special_item_kinds(name) {
                 lo = LeftOut::SpecialItem(s);
+            } else if self.layout() != Layout::ModelsWithItemDefs {
+                if let Ok(Some(LeftOut::BuiltinEntity)) = self.classify_item(name) {
+                    lo = LeftOut::BuiltinEntity;
+                }
             }
         }
         Ok(Some(lo))
@@ -700,7 +932,7 @@ impl Assets {
                 Some(Builtin::Entity) => Some(LeftOut::BuiltinEntity),
                 Some(Builtin::Other(_)) => Some(LeftOut::NoElements),
                 None if m.elements.is_empty() => Some(LeftOut::NoElements),
-                None => None,
+                None => self.unnameable_only(&m),
             };
             match lo {
                 None => return Ok(None),
@@ -725,7 +957,13 @@ pub mod tests {
     /// and a block entity, in the 1.13 to 1.21.3 layout
     pub fn tiny_jar() -> Jar {
         let tex = png(16, 16, |x, y| [(x * 16) as u8, (y * 16) as u8, 0, 255]);
-        let leaf = png(16, 16, |x, _| if x < 8 { [0, 200, 0, 255] } else { [0, 0, 0, 0] });
+        let leaf = png(16, 16, |x, _| {
+            if x < 8 {
+                [0, 200, 0, 255]
+            } else {
+                [0, 0, 0, 0]
+            }
+        });
         JarBuilder::new()
             .add("assets/minecraft/blockstates/cube.json", r#"{"variants":{"":{"model":"minecraft:block/cube"}}}"#)
             .add(
@@ -784,23 +1022,38 @@ pub mod tests {
         assert_eq!(a.layout(), Layout::Models);
         let b = a.bake_block("cube", &State::default()).unwrap();
         assert_eq!(b.quad_count(), 6);
-        assert_eq!(b.texture_paths().into_iter().collect::<Vec<_>>(), ["block/t"]);
+        assert_eq!(
+            b.texture_paths().into_iter().collect::<Vec<_>>(),
+            ["block/t"]
+        );
         assert!(b.report.left_out.is_none());
     }
 
     #[test]
     fn variants_by_state_and_rotation() {
         let a = tiny();
-        let n = a.bake_block("step", &State::parse("facing=north").unwrap()).unwrap();
-        let e = a.bake_block("step", &State::parse("facing=east").unwrap()).unwrap();
+        let n = a
+            .bake_block("step", &State::parse("facing=north").unwrap())
+            .unwrap();
+        let e = a
+            .bake_block("step", &State::parse("facing=east").unwrap())
+            .unwrap();
         assert_eq!(n.quad_count(), 2);
         assert_eq!(e.quad_count(), 2);
         // y = 90 turns the north face to the east
-        let nq = n.quads().find(|q| q.face == crate::model::Dir::North).unwrap();
-        let eq = e.quads().find(|q| q.face == crate::model::Dir::North).unwrap();
+        let nq = n
+            .quads()
+            .find(|q| q.face == crate::model::Dir::North)
+            .unwrap();
+        let eq = e
+            .quads()
+            .find(|q| q.face == crate::model::Dir::North)
+            .unwrap();
         assert_eq!(nq.normal, [0.0, 0.0, -1.0]);
         assert_eq!(eq.normal, [1.0, 0.0, 0.0]);
-        assert!(a.bake_block("step", &State::parse("facing=up").unwrap()).is_err());
+        assert!(a
+            .bake_block("step", &State::parse("facing=up").unwrap())
+            .is_err());
     }
 
     #[test]
@@ -808,7 +1061,9 @@ pub mod tests {
         let a = tiny();
         let plain = a.bake_block("fence", &State::default()).unwrap();
         assert_eq!(plain.parts.len(), 1);
-        let arm = a.bake_block("fence", &State::parse("north=true").unwrap()).unwrap();
+        let arm = a
+            .bake_block("fence", &State::parse("north=true").unwrap())
+            .unwrap();
         assert_eq!(arm.parts.len(), 2);
         assert_eq!(arm.parts[1].model, "block/arm");
     }
@@ -819,7 +1074,10 @@ pub mod tests {
         let b = a.bake_block("chest", &State::default()).unwrap();
         assert!(b.is_empty());
         assert_eq!(b.report.left_out, Some(LeftOut::NoElements));
-        assert_eq!(a.classify_block("chest").unwrap(), Some(LeftOut::NoElements));
+        assert_eq!(
+            a.classify_block("chest").unwrap(),
+            Some(LeftOut::NoElements)
+        );
         assert_eq!(a.classify_block("cube").unwrap(), None);
     }
 
@@ -838,9 +1096,15 @@ pub mod tests {
         // (one each), the west edge (one run) and the east edge at the half-way line (one run)
         assert_eq!(i.quad_count(), 2 + 4);
         assert_eq!(i.id, "item/leaf");
-        let west = i.quads().find(|q| q.face == crate::model::Dir::West).unwrap();
+        let west = i
+            .quads()
+            .find(|q| q.face == crate::model::Dir::West)
+            .unwrap();
         assert_eq!(west.pos[0][0], 0.0);
-        let east = i.quads().find(|q| q.face == crate::model::Dir::East).unwrap();
+        let east = i
+            .quads()
+            .find(|q| q.face == crate::model::Dir::East)
+            .unwrap();
         assert_eq!(east.pos[0][0], 0.5);
     }
 
@@ -859,7 +1123,10 @@ pub mod tests {
     #[test]
     fn names_and_missing_files() {
         let a = tiny();
-        assert_eq!(a.block_names(), ["chest", "cube", "fence", "leaves", "step"]);
+        assert_eq!(
+            a.block_names(),
+            ["chest", "cube", "fence", "leaves", "step"]
+        );
         assert!(a.item_names().contains(&"leaf".to_string()));
         assert!(a.blockstate("nope").is_err());
         assert!(a.texture("block/nope").is_err());
@@ -885,11 +1152,17 @@ pub mod tests {
     #[test]
     fn jars_without_models_say_so() {
         let jar = JarBuilder::new()
-            .add("assets/minecraft/textures/blocks/stone.png", png(1, 1, |_, _| [0, 0, 0, 255]))
+            .add(
+                "assets/minecraft/textures/blocks/stone.png",
+                png(1, 1, |_, _| [0, 0, 0, 255]),
+            )
             .build();
         let a = Assets::from_jar(jar).unwrap();
         assert_eq!(a.layout(), Layout::LooseTextures);
-        let e = a.bake_block("stone", &State::default()).unwrap_err().to_string();
+        let e = a
+            .bake_block("stone", &State::default())
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("textures only"), "{e}");
         assert!(a.texture("blocks/stone").is_ok());
     }
@@ -917,9 +1190,15 @@ pub mod tests {
         let a = Assets::from_jar(jar).unwrap();
         assert_eq!(a.layout(), Layout::ModelsWithItemDefs);
         let i = a.bake_item("leaves").unwrap();
-        assert_eq!(i.parts[0].tints.get(0), Some(&Tint::Rgb([0x48, 0xB5, 0x18])));
+        assert_eq!(
+            i.parts[0].tints.get(0),
+            Some(&Tint::Rgb([0x48, 0xB5, 0x18]))
+        );
         let c = a.bake_item("chest").unwrap();
-        assert_eq!(c.report.left_out, Some(LeftOut::SpecialItem(vec!["chest".into()])));
+        assert_eq!(
+            c.report.left_out,
+            Some(LeftOut::SpecialItem(vec!["chest".into()]))
+        );
         // the block itself reports the same reason from its item definition
         assert_eq!(
             a.classify_block("chest").unwrap(),

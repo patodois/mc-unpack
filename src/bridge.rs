@@ -269,12 +269,19 @@ impl Minecraft {
         let mut out = Vec::new();
         if !bs.variants.is_empty() {
             for k in bs.keys() {
-                out.push(if k.is_empty() { "(no properties)".into() } else { k.to_string() });
+                out.push(if k.is_empty() {
+                    "(no properties)".into()
+                } else {
+                    k.to_string()
+                });
             }
         } else {
             let pv: BTreeMap<_, _> = bs.property_values();
             for (p, vs) in pv {
-                out.push(format!("{p}: {}", vs.into_iter().collect::<Vec<_>>().join(" | ")));
+                out.push(format!(
+                    "{p}: {}",
+                    vs.into_iter().collect::<Vec<_>>().join(" | ")
+                ));
             }
         }
         Ok(out)
@@ -329,7 +336,12 @@ mod tests {
                 variant: Some("facing=east,half=bottom".into())
             }
         );
-        assert_eq!(AssetId::parse("item/stick").unwrap(), AssetId::Item { name: "stick".into() });
+        assert_eq!(
+            AssetId::parse("item/stick").unwrap(),
+            AssetId::Item {
+                name: "stick".into()
+            }
+        );
         assert!(AssetId::parse("stick").is_err());
         assert!(AssetId::parse("item/stick?variant=a=b").is_err());
         assert!(AssetId::parse("block/x?foo=1").is_err());
@@ -353,9 +365,17 @@ mod tests {
         let n = m.load("block/step?variant=facing=north").unwrap();
         let e = m.load("block/step?variant=facing=east").unwrap();
         // the north face of the north variant is at z = -0.5, of the east one at x = 0.5
-        let nz = n.meshes[0].positions.iter().map(|p| p[2]).fold(9.0f32, f32::min);
+        let nz = n.meshes[0]
+            .positions
+            .iter()
+            .map(|p| p[2])
+            .fold(9.0f32, f32::min);
         assert_eq!(nz, -0.5);
-        let ex = e.meshes[0].positions.iter().map(|p| p[0]).fold(-9.0f32, f32::max);
+        let ex = e.meshes[0]
+            .positions
+            .iter()
+            .map(|p| p[0])
+            .fold(-9.0f32, f32::max);
         assert_eq!(ex, 0.5);
     }
 

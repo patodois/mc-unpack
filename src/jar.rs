@@ -90,7 +90,10 @@ impl Jar {
         let mut z = self.zip.lock().unwrap();
         let mut f = z.by_index(i)?;
         if f.size() > MAX_ENTRY {
-            bail!("{name}: {} bytes is over the {MAX_ENTRY} byte limit", f.size());
+            bail!(
+                "{name}: {} bytes is over the {MAX_ENTRY} byte limit",
+                f.size()
+            );
         }
         let mut out = Vec::with_capacity(f.size() as usize);
         f.read_to_end(&mut out)
@@ -113,6 +116,7 @@ pub mod testjar {
 
     use super::Jar;
 
+    #[derive(Default)]
     pub struct JarBuilder {
         files: Vec<(String, Vec<u8>)>,
     }

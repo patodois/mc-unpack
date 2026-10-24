@@ -58,7 +58,11 @@ pub fn layer_elements(layer: u32, texture: &str, w: u32, h: u32, opaque: &[bool]
     let fx = 16.0 / w as f64;
     let fy = 16.0 / h as f64;
     let op = |x: i64, y: i64| -> bool {
-        x >= 0 && y >= 0 && x < w as i64 && y < h as i64 && opaque[(y as usize) * w as usize + x as usize]
+        x >= 0
+            && y >= 0
+            && x < w as i64
+            && y < h as i64
+            && opaque[(y as usize) * w as usize + x as usize]
     };
     let mut out = Vec::new();
     out.push(Element {
@@ -96,7 +100,12 @@ pub fn layer_elements(layer: u32, texture: &str, w: u32, h: u32, opaque: &[bool]
                         faces: vec![(
                             dir,
                             face(
-                                [x0 as f64 * fx, y as f64 * fy, x as f64 * fx, (y + 1) as f64 * fy],
+                                [
+                                    x0 as f64 * fx,
+                                    y as f64 * fy,
+                                    x as f64 * fx,
+                                    (y + 1) as f64 * fy,
+                                ],
                                 texture,
                                 layer,
                             ),
@@ -132,7 +141,12 @@ pub fn layer_elements(layer: u32, texture: &str, w: u32, h: u32, opaque: &[bool]
                         faces: vec![(
                             dir,
                             face(
-                                [x as f64 * fx, y0 as f64 * fy, (x + 1) as f64 * fx, y as f64 * fy],
+                                [
+                                    x as f64 * fx,
+                                    y0 as f64 * fy,
+                                    (x + 1) as f64 * fx,
+                                    y as f64 * fy,
+                                ],
                                 texture,
                                 layer,
                             ),
@@ -151,7 +165,10 @@ pub fn layer_elements(layer: u32, texture: &str, w: u32, h: u32, opaque: &[bool]
 #[derive(Clone, Debug, PartialEq)]
 pub enum ItemTint {
     Constant([u8; 3]),
-    Grass { temperature: f64, downfall: f64 },
+    Grass {
+        temperature: f64,
+        downfall: f64,
+    },
     /// A colour the game computes from the stack (dye, potion, firework, map ...): the definition's
     /// `default`, which is what an unmodified item shows, when it gives one
     Dynamic {
@@ -165,7 +182,10 @@ impl ItemTint {
     pub fn to_tint(&self) -> Option<Tint> {
         match self {
             ItemTint::Constant(c) => Some(Tint::Rgb(*c)),
-            ItemTint::Grass { temperature, downfall } => Some(Tint::Colormap {
+            ItemTint::Grass {
+                temperature,
+                downfall,
+            } => Some(Tint::Colormap {
                 kind: ColormapKind::Grass,
                 temperature: *temperature,
                 downfall: *downfall,
@@ -203,7 +223,11 @@ fn parse_tints(v: Option<&Value>) -> Vec<ItemTint> {
     };
     list.iter()
         .map(|t| {
-            let ty = t.get("type").and_then(|s| s.as_str()).map(short).unwrap_or("");
+            let ty = t
+                .get("type")
+                .and_then(|s| s.as_str())
+                .map(short)
+                .unwrap_or("");
             match ty {
                 "constant" => t
                     .get("value")
@@ -242,7 +266,11 @@ pub fn default_models(def: &Value) -> DefaultModels {
 }
 
 fn walk(node: &Value, out: &mut DefaultModels) {
-    let ty = node.get("type").and_then(|s| s.as_str()).map(short).unwrap_or("");
+    let ty = node
+        .get("type")
+        .and_then(|s| s.as_str())
+        .map(short)
+        .unwrap_or("");
     match ty {
         "model" => match node.get("model").and_then(|m| m.as_str()) {
             Some(m) => out.models.push(ItemModelRef {
@@ -264,7 +292,10 @@ fn walk(node: &Value, out: &mut DefaultModels) {
                 Some(b) => {
                     out.notes.push(format!(
                         "condition on {}: took on_false",
-                        node.get("property").and_then(|p| p.as_str()).map(short).unwrap_or("?")
+                        node.get("property")
+                            .and_then(|p| p.as_str())
+                            .map(short)
+                            .unwrap_or("?")
                     ));
                     walk(b, out)
                 }
@@ -272,22 +303,36 @@ fn walk(node: &Value, out: &mut DefaultModels) {
             }
         }
         "select" | "range_dispatch" => {
-            let prop = node.get("property").and_then(|p| p.as_str()).map(short).unwrap_or("?");
+            let prop = node
+                .get("property")
+                .and_then(|p| p.as_str())
+                .map(short)
+                .unwrap_or("?");
             let first = if ty == "select" {
-                node.get("cases").and_then(|c| c.as_array()).and_then(|c| c.first())
+                node.get("cases")
+                    .and_then(|c| c.as_array())
+                    .and_then(|c| c.first())
             } else {
-                node.get("entries").and_then(|c| c.as_array()).and_then(|c| c.first())
+                node.get("entries")
+                    .and_then(|c| c.as_array())
+                    .and_then(|c| c.first())
             }
             .and_then(|c| c.get("model"));
             match node.get("fallback").or(first) {
                 Some(b) => {
                     out.notes.push(format!(
                         "{ty} on {prop}: took the {}",
-                        if node.get("fallback").is_some() { "fallback" } else { "first case" }
+                        if node.get("fallback").is_some() {
+                            "fallback"
+                        } else {
+                            "first case"
+                        }
                     ));
                     walk(b, out)
                 }
-                None => out.notes.push(format!("a `{ty}` without a fallback or cases")),
+                None => out
+                    .notes
+                    .push(format!("a `{ty}` without a fallback or cases")),
             }
         }
         "special" => {
@@ -324,7 +369,13 @@ mod tests {
     fn quads(els: &[Element]) -> Vec<crate::bake::Quad> {
         let mut out = Vec::new();
         for e in els {
-            bake_element(e, VariantRotation::default(), &mut |_| Ok(("item/t".into(), false)), &mut out).unwrap();
+            bake_element(
+                e,
+                VariantRotation::default(),
+                &mut |_| Ok(("item/t".into(), false)),
+                &mut out,
+            )
+            .unwrap();
         }
         out
     }
@@ -338,7 +389,14 @@ mod tests {
         let q = quads(&els);
         assert_eq!(q.len(), 2 + 4);
         let faces: Vec<_> = q.iter().map(|q| q.face).collect();
-        for d in [Dir::Up, Dir::Down, Dir::West, Dir::East, Dir::North, Dir::South] {
+        for d in [
+            Dir::Up,
+            Dir::Down,
+            Dir::West,
+            Dir::East,
+            Dir::North,
+            Dir::South,
+        ] {
             assert!(faces.contains(&d), "{d:?}");
         }
         // the slab is one pixel thick, centred on the block
@@ -356,7 +414,12 @@ mod tests {
         // the UV of each strip is that pixel
         for s in &sides {
             let uv = s.faces[0].1.uv.unwrap();
-            assert_eq!([uv[0], uv[1], uv[2], uv[3]], [5.0, 3.0, 6.0, 4.0], "{:?}", s.faces[0].0);
+            assert_eq!(
+                [uv[0], uv[1], uv[2], uv[3]],
+                [5.0, 3.0, 6.0, 4.0],
+                "{:?}",
+                s.faces[0].0
+            );
         }
         // its left edge faces west at x = 5 and spans the pixel's height: y 12..13
         let west = sides.iter().find(|s| s.faces[0].0 == Dir::West).unwrap();
@@ -372,7 +435,11 @@ mod tests {
         let o = opaque_from(16, 16, |x, y| (4..7).contains(&x) && (4..7).contains(&y));
         let els = layer_elements(0, "#layer0", 16, 16, &o);
         assert_eq!(els.len(), 1 + 4, "one merged run per side");
-        let up = els.iter().skip(1).find(|s| s.faces[0].0 == Dir::Up).unwrap();
+        let up = els
+            .iter()
+            .skip(1)
+            .find(|s| s.faces[0].0 == Dir::Up)
+            .unwrap();
         assert_eq!(up.from[0], 4.0);
         assert_eq!(up.to[0], 7.0);
     }
@@ -380,7 +447,9 @@ mod tests {
     #[test]
     fn a_hole_gets_inward_facing_edges() {
         // a ring: the hole's four neighbours each get an edge facing into the hole
-        let o = opaque_from(16, 16, |x, y| (4..9).contains(&x) && (4..9).contains(&y) && !(x == 6 && y == 6));
+        let o = opaque_from(16, 16, |x, y| {
+            (4..9).contains(&x) && (4..9).contains(&y) && !(x == 6 && y == 6)
+        });
         let els = layer_elements(0, "#layer0", 16, 16, &o);
         let dirs: Vec<Dir> = els.iter().skip(1).map(|e| e.faces[0].0).collect();
         // 4 outer runs + 4 hole edges
@@ -407,7 +476,11 @@ mod tests {
     fn a_texture_that_is_not_16_wide_scales_the_strips() {
         let o = opaque_from(32, 32, |x, y| x == 0 && y == 0);
         let els = layer_elements(0, "#layer0", 32, 32, &o);
-        let west = els.iter().skip(1).find(|s| s.faces[0].0 == Dir::East).unwrap();
+        let west = els
+            .iter()
+            .skip(1)
+            .find(|s| s.faces[0].0 == Dir::East)
+            .unwrap();
         assert_eq!(west.from[0], 0.5);
         assert_eq!(west.to[1], 16.0);
     }
@@ -442,10 +515,16 @@ mod tests {
         .unwrap();
         let r = default_models(&d);
         let names: Vec<_> = r.models.iter().map(|m| m.model.as_str()).collect();
-        assert_eq!(names, ["minecraft:item/a", "minecraft:item/b", "minecraft:item/f"]);
+        assert_eq!(
+            names,
+            ["minecraft:item/a", "minecraft:item/b", "minecraft:item/f"]
+        );
         assert_eq!(r.special, ["chest"]);
         assert_eq!(r.models[0].tints[0], ItemTint::Constant([0x48, 0xB5, 0x18]));
-        assert_eq!(r.models[0].tints[1].to_tint(), Some(Tint::Rgb([0xA0, 0x65, 0x40])));
+        assert_eq!(
+            r.models[0].tints[1].to_tint(),
+            Some(Tint::Rgb([0xA0, 0x65, 0x40]))
+        );
         assert_eq!(r.models[0].tints[2].to_tint(), None);
         assert_eq!(r.notes.len(), 2);
     }
@@ -459,7 +538,11 @@ mod tests {
         let r = default_models(&d);
         assert_eq!(
             r.models[0].tints[0].to_tint(),
-            Some(Tint::Colormap { kind: ColormapKind::Grass, temperature: 0.5, downfall: 1.0 })
+            Some(Tint::Colormap {
+                kind: ColormapKind::Grass,
+                temperature: 0.5,
+                downfall: 1.0
+            })
         );
     }
 }

@@ -66,7 +66,9 @@ pub fn write(model: &BakedModel, groups: &[Group], name: &str, out_dir: &Path) -
             pad4(&mut bin);
             let off = bin.len();
             bin.extend_from_slice(data);
-            views.push(json!({"buffer": 0, "byteOffset": off, "byteLength": data.len(), "target": target}));
+            views.push(
+                json!({"buffer": 0, "byteOffset": off, "byteLength": data.len(), "target": target}),
+            );
             views.len() - 1
         };
         let f32s = |v: &[f32]| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
@@ -74,19 +76,29 @@ pub fn write(model: &BakedModel, groups: &[Group], name: &str, out_dir: &Path) -
         let nv = add_view(&f32s(&nor), 34962);
         let uv = add_view(&f32s(&uvs), 34962);
         let iv = add_view(
-            &idx.iter().flat_map(|x| x.to_le_bytes()).collect::<Vec<u8>>(),
+            &idx.iter()
+                .flat_map(|x| x.to_le_bytes())
+                .collect::<Vec<u8>>(),
             34963,
         );
-        let mut acc = |view: usize, count: usize, ty: &str, comp: u32, extra: Option<(Value, Value)>| {
-            let mut a = json!({"bufferView": view, "componentType": comp, "count": count, "type": ty});
-            if let Some((mn, mx)) = extra {
-                a["min"] = mn;
-                a["max"] = mx;
-            }
-            accessors.push(a);
-            accessors.len() - 1
-        };
-        let pa = acc(pv, pos.len() / 3, "VEC3", 5126, Some((json!(min), json!(max))));
+        let mut acc =
+            |view: usize, count: usize, ty: &str, comp: u32, extra: Option<(Value, Value)>| {
+                let mut a =
+                    json!({"bufferView": view, "componentType": comp, "count": count, "type": ty});
+                if let Some((mn, mx)) = extra {
+                    a["min"] = mn;
+                    a["max"] = mx;
+                }
+                accessors.push(a);
+                accessors.len() - 1
+            };
+        let pa = acc(
+            pv,
+            pos.len() / 3,
+            "VEC3",
+            5126,
+            Some((json!(min), json!(max))),
+        );
         let na = acc(nv, nor.len() / 3, "VEC3", 5126, None);
         let ua = acc(uv, uvs.len() / 2, "VEC2", 5126, None);
         let ia = acc(iv, idx.len(), "SCALAR", 5125, None);
@@ -97,11 +109,14 @@ pub fn write(model: &BakedModel, groups: &[Group], name: &str, out_dir: &Path) -
             None => {
                 let n = images.len();
                 let file = format!("{name}_{n}.png");
-                fs::write(out_dir.join(&file), encode_png(&Rgba {
-                    width: g.image.width,
-                    height: g.image.height,
-                    data: g.image.data.clone(),
-                })?)?;
+                fs::write(
+                    out_dir.join(&file),
+                    encode_png(&Rgba {
+                        width: g.image.width,
+                        height: g.image.height,
+                        data: g.image.data.clone(),
+                    })?,
+                )?;
                 images.push(json!({"uri": file}));
                 image_ids.insert(key, n);
                 n
@@ -182,7 +197,10 @@ mod tests {
         let doc: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
         assert_eq!(doc["asset"]["version"], "2.0");
         assert_eq!(doc["samplers"][0]["magFilter"], NEAREST);
-        assert_eq!(doc["meshes"][0]["primitives"][0]["extras"]["texture"], "block/t");
+        assert_eq!(
+            doc["meshes"][0]["primitives"][0]["extras"]["texture"],
+            "block/t"
+        );
         // the box is a unit cube on its bottom centre
         let acc = &doc["accessors"][0];
         assert_eq!(acc["count"], 24);

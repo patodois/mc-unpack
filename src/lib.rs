@@ -20,6 +20,9 @@
 //! - [`assets`]: the one object that ties them to a jar; [`mesh`]: quads grouped by material;
 //!   [`gltf`]: export; [`check`]: the sweep.
 
+// Pixel loops read better as chunks_exact(4) than as_chunks; is_multiple_of is newer than some toolchains
+#![allow(clippy::chunks_exact_to_as_chunks, clippy::manual_is_multiple_of)]
+
 pub mod assets;
 pub mod bake;
 pub mod blockstate;
