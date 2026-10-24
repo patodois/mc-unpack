@@ -141,8 +141,8 @@ pub fn write(model: &BakedModel, groups: &[Group], name: &str, out_dir: &Path) -
         textures.push(json!({"sampler": 0, "source": image_index}));
         let mut mat = json!({
             "name": match g.tint_index {
-                Some(t) => format!("{}#tint{t}", g.texture),
-                None => g.texture.clone(),
+                Some(t) => format!("{}#tint{t}", &*g.texture),
+                None => g.texture.to_string(),
             },
             "pbrMetallicRoughness": {
                 "baseColorTexture": {"index": textures.len() - 1},
@@ -165,7 +165,7 @@ pub fn write(model: &BakedModel, groups: &[Group], name: &str, out_dir: &Path) -
             "indices": ia,
             "material": materials.len() - 1,
             "extras": {
-                "texture": g.texture,
+                "texture": &*g.texture,
                 "tintindex": g.tint_index,
                 "tint": g.tint.map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])),
             }

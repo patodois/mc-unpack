@@ -7,6 +7,7 @@ use mc_unpack::assets::{AssetId, Assets, LeftOut};
 use mc_unpack::check;
 use mc_unpack::gltf;
 use mc_unpack::install::{find_jars, JarFile, Source};
+use mc_unpack::jar::escape_control as esc;
 use mc_unpack::mesh::{self, MeshOptions, Origin};
 use mc_unpack::texture::encode_png;
 use mc_unpack::tint::{parse_rgb, ColormapKind, Tint, TintSet};
@@ -238,7 +239,7 @@ fn cmd_list(
                 }
                 Ok(None) => {}
                 Ok(Some(lo)) => left.push((format!("block/{n}"), lo)),
-                Err(e) => eprintln!("block/{n}: {e:#}"),
+                Err(e) => eprintln!("block/{n}: {}", esc(&format!("{e:#}"))),
             }
         }
     }
@@ -252,7 +253,7 @@ fn cmd_list(
                 Ok(None) => {}
                 Ok(Some(LeftOut::Template)) => {}
                 Ok(Some(lo)) => left.push((format!("item/{n}"), lo)),
-                Err(e) => eprintln!("item/{n}: {e:#}"),
+                Err(e) => eprintln!("item/{n}: {}", esc(&format!("{e:#}"))),
             }
         }
     }
@@ -328,7 +329,7 @@ fn parse_tint(a: &Assets, spec: &str) -> Result<(u32, Tint)> {
             .ok_or_else(|| anyhow!("{kind:?}: grass, foliage or dry_foliage"))?;
         let (t, notes) = a.tint_for_biome(kind, biome)?;
         for n in notes {
-            eprintln!("note: {n}");
+            eprintln!("note: {}", esc(&n));
         }
         return Ok((idx, t));
     }
@@ -358,7 +359,7 @@ fn cmd_model(
 ) -> Result<()> {
     let baked = a.bake_id(&id)?;
     for n in &baked.report.notes {
-        eprintln!("note: {n}");
+        eprintln!("note: {}", esc(n));
     }
     if !baked.report.ignored_properties.is_empty() {
         eprintln!(
@@ -430,16 +431,16 @@ fn cmd_inspect(a: Assets, id: String) -> Result<()> {
         println!("  tintindex used: {}", tints.join(", "));
     }
     for n in &r.notes {
-        println!("  note: {n}");
+        println!("  note: {}", esc(n));
     }
     for f in &r.failed_parts {
-        println!("  FAILED part: {f}");
+        println!("  FAILED part: {}", esc(f));
     }
     for d in &r.dropped_parts {
-        println!("  left-out part: {d}");
+        println!("  left-out part: {}", esc(d));
     }
     if let Some(lo) = &r.left_out {
-        println!("  LEFT OUT: {lo}");
+        println!("  LEFT OUT: {}", esc(&lo.to_string()));
     }
     Ok(())
 }
@@ -492,7 +493,7 @@ fn cmd_tint(
         (Some(b), None, None) => {
             let (t, notes) = a.tint_for_biome(kind, b)?;
             for n in notes {
-                eprintln!("note: {n}");
+                eprintln!("note: {}", esc(&n));
             }
             t
         }
@@ -589,22 +590,25 @@ fn cmd_check(cli: &Cli, verbose: bool) -> Result<bool> {
                     );
                     if verbose {
                         for n in &r.left_out_inside_models {
-                            println!("      {n}");
+                            println!("      {}", esc(n));
                         }
                     }
                 }
-                for f in &r.upstream_defects {
-                    println!("   upstream defect (not a failure): {f}");
-                }
                 println!(
-                    "   biggest met (limits): png {} px ({}), sheet frames {} ({}), frame list {} ({}), item quads {}",
+                    "   biggest met (limits): png {} px ({}), sheet frames {} ({}), frame list {} ({}), item quads {}, one bake: {} parts ({}), {} quads ({}), {} image bytes ({})",
                     r.max_png_pixels,
                     mc_unpack::texture::MAX_PIXELS,
                     r.max_sheet_frames,
                     mc_unpack::texture::MAX_SHEET_FRAMES,
                     r.max_frame_list,
                     mc_unpack::texture::MAX_FRAME_LIST,
-                    r.max_item_quads
+                    r.max_item_quads,
+                    r.max_bake_parts,
+                    mc_unpack::assets::MAX_BAKE_PARTS,
+                    r.max_bake_quads,
+                    mc_unpack::assets::MAX_BAKE_QUADS,
+                    r.max_bake_image_bytes,
+                    mc_unpack::assets::MAX_BAKE_IMAGE_BYTES
                 );
                 println!("   failures: {}  ({:.1} s)", r.total_failed(), r.seconds);
                 total_failed += r.total_failed();
@@ -638,12 +642,15 @@ fn cmd_check_bridge(cli: &Cli) -> Result<bool> {
         };
         let start = std::time::Instant::now();
         let list = mc.list("").map_err(|e| anyhow!("{e}"))?;
-        let (mut ok, mut failed, mut tris, mut mats) = (0u64, 0u64, 0u64, 0u64);
+        let (mut ok, mut failed, mut tris, mut mats, mut partial) = (0u64, 0u64, 0u64, 0u64, 0u64);
         let mut fails = Vec::new();
         for info in &list {
             match mc.load_report(&info.id) {
                 Ok((m, r)) => {
                     ok += 1;
+                    if !r.dropped_parts.is_empty() {
+                        partial += 1;
+                    }
                     tris += m
                         .meshes
                         .iter()
@@ -671,7 +678,7 @@ fn cmd_check_bridge(cli: &Cli) -> Result<bool> {
             }
         }
         println!(
-            "== Minecraft {id}: {} listed, {ok} loaded, {failed} failed ({tris} triangles, {mats} materials, {:.1} s)",
+            "== Minecraft {id}: {} listed, {ok} loaded ({partial} of them with a part left out), {failed} failed ({tris} triangles, {mats} materials, {:.1} s)",
             list.len(),
             start.elapsed().as_secs_f64()
         );
@@ -758,7 +765,7 @@ fn main() {
         Ok(true) => {}
         Ok(false) => std::process::exit(1),
         Err(e) => {
-            eprintln!("error: {e:#}");
+            eprintln!("error: {}", esc(&format!("{e:#}")));
             std::process::exit(1);
         }
     }

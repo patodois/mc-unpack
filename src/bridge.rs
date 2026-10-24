@@ -65,6 +65,8 @@ pub struct LoadReport {
     pub baked: BakedModel,
     pub quads: usize,
     pub materials: usize,
+    /// Parts of an item left out (drawn by code, or refused) while the rest loaded
+    pub dropped_parts: Vec<String>,
 }
 
 /// A block or item whose data has no geometry
@@ -170,11 +172,23 @@ impl Minecraft {
             }
             .into());
         }
+        // An item whose parts failed to bake is not the item: a partial model must not pass for it
+        if !baked.report.failed_parts.is_empty() {
+            bail!(
+                "{id}: {} part(s) failed to bake: {}",
+                baked.report.failed_parts.len(),
+                baked.report.failed_parts.join("; ")
+            );
+        }
         let groups = mesh::build(&self.assets, &baked, &self.mesh_options())?;
         // rewrite-bridge 0.2 has no channel for notes, so the name carries what a caller most needs:
         // the id that reproduces this exact model, with the state that was chosen for it
-        let name = match (&baked.report.state_used, id.contains('?')) {
-            (Some(s), false) => format!("{id}?variant={s}"),
+        let name = match &baked.report.state_used {
+            // whenever the state was not fully given (none, or a partial one that fit several
+            // entries), say which entry was picked
+            Some(s) if !id.contains('?') || baked.report.candidates > 1 => {
+                format!("{}?variant={s}", id.split('?').next().unwrap_or(id))
+            }
             _ => id.to_string(),
         };
         let mut model = Model {
@@ -198,7 +212,7 @@ impl Minecraft {
             }
             let name = match g.tint_index {
                 Some(t) => format!("{}#tint{t}", g.texture),
-                None => g.texture.clone(),
+                None => g.texture.to_string(),
             };
             model.materials.push(Material {
                 name: name.clone(),
@@ -235,6 +249,7 @@ impl Minecraft {
         let report = LoadReport {
             quads: baked.quad_count(),
             materials: model.materials.len(),
+            dropped_parts: baked.report.dropped_parts.clone(),
             baked,
         };
         Ok((model, report))
@@ -456,5 +471,93 @@ mod tests {
         // the id is unchanged, and the name still filters
         assert_eq!(m.list("facing=north").unwrap().len(), 1);
         assert_eq!(m.list("cube").unwrap()[0].name, "cube");
+    }
+
+    fn composite_jar(second: &str) -> Assets {
+        use crate::jar::testjar::{png, JarBuilder};
+        let b = JarBuilder::new()
+            .add(
+                "assets/minecraft/blockstates/x.json",
+                r#"{"variants":{"":{"model":"block/nothing"}}}"#,
+            )
+            .add(
+                "assets/minecraft/models/item/generated.json",
+                r#"{"parent":"builtin/generated"}"#,
+            )
+            .add(
+                "assets/minecraft/models/item/ok.json",
+                r#"{"parent":"item/generated","textures":{"layer0":"item/ok"}}"#,
+            )
+            .add(
+                "assets/minecraft/models/item/bad.json",
+                r#"{"parent":"item/generated","textures":{"layer0":"item/missing"}}"#,
+            )
+            .add(
+                "assets/minecraft/textures/item/ok.png",
+                png(16, 16, |_, _| [1, 2, 3, 255]),
+            )
+            .add(
+                "assets/minecraft/items/ok.json",
+                r#"{"model":{"type":"minecraft:model","model":"minecraft:item/ok"}}"#,
+            )
+            .add(
+                "assets/minecraft/items/c.json",
+                format!(
+                    r#"{{"model":{{"type":"minecraft:composite","models":[
+                {{"type":"minecraft:model","model":"minecraft:item/ok"}},{second}]}}}}"#
+                ),
+            );
+        Assets::from_jar(b.build()).unwrap()
+    }
+
+    #[test]
+    fn an_item_with_a_failed_part_does_not_load() {
+        let m = Minecraft::from_assets(composite_jar(
+            r#"{"type":"minecraft:model","model":"minecraft:item/bad"}"#,
+        ))
+        .unwrap();
+        let e = m.load("item/c").unwrap_err();
+        assert!(
+            e.to_string().contains("failed to bake") && e.to_string().contains("item/bad"),
+            "{e}"
+        );
+        // the good half alone is a different item: it still loads under its own name
+        assert!(m.load("item/ok").is_ok());
+    }
+
+    #[test]
+    fn an_item_that_lost_a_part_to_code_loads_and_says_so() {
+        let special = r#"{"type":"minecraft:special","base":"minecraft:item/chest","model":{"type":"minecraft:chest","texture":"minecraft:normal"}}"#;
+        let m = Minecraft::from_assets(composite_jar(special)).unwrap();
+        let (model, report) = m.load_report("item/c").unwrap();
+        assert!(!model.meshes.is_empty());
+        assert_eq!(report.dropped_parts.len(), 1);
+        assert!(
+            report.dropped_parts[0].contains("chest"),
+            "{:?}",
+            report.dropped_parts
+        );
+    }
+
+    #[test]
+    fn a_partial_variant_that_fits_several_entries_is_named_with_the_one_picked() {
+        let jar = {
+            use crate::jar::testjar::{png, JarBuilder};
+            JarBuilder::new()
+                .add("assets/minecraft/blockstates/s.json", r#"{"variants":{"a=1,b=1":{"model":"block/m"},"a=1,b=2":{"model":"block/m"},"a=2,b=1":{"model":"block/m"}}}"#)
+                .add("assets/minecraft/models/block/m.json", r##"{"textures":{"all":"block/t"},"elements":[{"from":[0,0,0],"to":[16,16,16],"faces":{"up":{"texture":"#all"}}}]}"##)
+                .add("assets/minecraft/textures/block/t.png", png(2, 2, |_, _| [1, 2, 3, 255]))
+                .build()
+        };
+        let m = Minecraft::from_assets(Assets::from_jar(jar).unwrap()).unwrap();
+        assert_eq!(
+            m.load("block/s?variant=a=1").unwrap().name,
+            "block/s?variant=a=1,b=1"
+        );
+        // a state that names a single entry keeps the id as written
+        assert_eq!(
+            m.load("block/s?variant=a=2,b=1").unwrap().name,
+            "block/s?variant=a=2,b=1"
+        );
     }
 }

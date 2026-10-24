@@ -215,6 +215,8 @@ pub struct Animation {
     pub frames: Vec<AnimFrame>,
     /// Whether the file listed its frames (false: `frames` was filled in from the sheet)
     pub explicit_frames: bool,
+    /// Listed frames that are not on the sheet and were dropped, as the game does
+    pub skipped_frames: usize,
 }
 
 /// What a `.mcmeta` says that this crate uses
@@ -232,33 +234,55 @@ pub struct RawAnimation {
     pub frames: Option<Vec<(u32, Option<u32>)>>,
 }
 
+/// A whole number from JSON in `lo..=u32::MAX`; `90.0` counts as 90, a fraction does not
+fn whole_u32(v: &Value, what: &str, lo: u32) -> Result<u32> {
+    let n = match v.as_u64() {
+        Some(n) => Some(n as f64),
+        None => v.as_f64().filter(|f| f.is_finite() && f.fract() == 0.0),
+    };
+    match n {
+        Some(n) if n >= lo as f64 && n <= u32::MAX as f64 => Ok(n as u32),
+        _ => bail!("{what} must be a whole number from {lo} to {}", u32::MAX),
+    }
+}
+
 impl McMeta {
     pub fn parse(text: impl AsRef<[u8]>) -> Result<McMeta> {
         let v: Value = crate::jar::parse_json(text.as_ref()).context("the .mcmeta is not JSON")?;
         let Some(a) = v.get("animation") else {
             return Ok(McMeta { animation: None });
         };
-        let num = |k: &str| a.get(k).and_then(|n| n.as_u64()).map(|n| n as u32);
-        let frametime = num("frametime").unwrap_or(1);
-        if frametime == 0 {
-            bail!("animation.frametime is 0");
-        }
+        let opt = |k: &str, lo: u32| -> Result<Option<u32>> {
+            a.get(k)
+                .map(|n| whole_u32(n, &format!("animation.{k}"), lo))
+                .transpose()
+        };
+        // frametime, width and height are positive in the game; a section that breaks that is
+        // not read at all
+        let frametime = opt("frametime", 1)?.unwrap_or(1);
         let frames = match a.get("frames") {
             None => None,
             Some(Value::Array(list)) => {
+                if list.len() > MAX_FRAME_LIST {
+                    bail!(
+                        "the animation lists {} frames; the limit is {MAX_FRAME_LIST}",
+                        list.len()
+                    );
+                }
                 let mut out = Vec::with_capacity(list.len());
                 for f in list {
                     match f {
-                        Value::Number(n) => {
-                            out.push((n.as_u64().context("frame index")? as u32, None))
-                        }
+                        Value::Number(_) => out.push((whole_u32(f, "a frame index", 0)?, None)),
                         Value::Object(o) => {
-                            let index = o
-                                .get("index")
-                                .and_then(|n| n.as_u64())
-                                .context("frame without an index")?
-                                as u32;
-                            let time = o.get("time").and_then(|n| n.as_u64()).map(|n| n as u32);
+                            let index = whole_u32(
+                                o.get("index").context("a frame without an index")?,
+                                "a frame index",
+                                0,
+                            )?;
+                            let time = o
+                                .get("time")
+                                .map(|t| whole_u32(t, "a frame time", 1))
+                                .transpose()?;
                             out.push((index, time));
                         }
                         _ => bail!("a frame is neither a number nor an object"),
@@ -270,13 +294,14 @@ impl McMeta {
         };
         Ok(McMeta {
             animation: Some(RawAnimation {
-                interpolate: a
-                    .get("interpolate")
-                    .and_then(|b| b.as_bool())
-                    .unwrap_or(false),
+                interpolate: match a.get("interpolate") {
+                    None | Some(Value::Null) => false,
+                    Some(Value::Bool(b)) => *b,
+                    Some(_) => bail!("animation.interpolate is not true or false"),
+                },
                 frametime,
-                width: num("width"),
-                height: num("height"),
+                width: opt("width", 1)?,
+                height: opt("height", 1)?,
                 frames,
             }),
         })
@@ -326,6 +351,7 @@ impl Texture {
         if count > MAX_SHEET_FRAMES {
             bail!("the sheet holds {count} frames; the limit is {MAX_SHEET_FRAMES}");
         }
+        let mut skipped = 0usize;
         let (frames, explicit) = match &a.frames {
             Some(list) => {
                 if list.len() > MAX_FRAME_LIST {
@@ -334,10 +360,12 @@ impl Texture {
                         list.len()
                     );
                 }
+                // The game drops a listed frame that is not on the sheet (and says so in its log)
                 let mut out = Vec::with_capacity(list.len());
                 for &(index, time) in list {
                     if index >= count {
-                        bail!("frame {index} is past the {count} frames of the sheet");
+                        skipped += 1;
+                        continue;
                     }
                     out.push(AnimFrame {
                         index,
@@ -356,18 +384,22 @@ impl Texture {
                 false,
             ),
         };
+        // With one frame or none left the game does not animate the sprite at all: it is the
+        // sheet's first frame, whatever the one listed frame was
+        let animation = (frames.len() > 1).then_some(Animation {
+            interpolate: a.interpolate,
+            frametime: a.frametime,
+            width: a.width,
+            height: a.height,
+            frames,
+            explicit_frames: explicit,
+            skipped_frames: skipped,
+        });
         Ok(Texture {
             frame_width: fw,
             frame_height: fh,
             sheet,
-            animation: Some(Animation {
-                interpolate: a.interpolate,
-                frametime: a.frametime,
-                width: a.width,
-                height: a.height,
-                frames,
-                explicit_frames: explicit,
-            }),
+            animation,
         })
     }
 
@@ -473,10 +505,39 @@ mod tests {
     }
 
     #[test]
-    fn bad_frame_is_an_error() {
-        let img = decode_png(&png(2, 4, |_, _| [0, 0, 0, 255])).unwrap();
-        let meta = McMeta::parse(r#"{"animation":{"frames":[5]}}"#).unwrap();
-        assert!(Texture::new(img, Some(&meta)).is_err());
+    fn frames_that_are_not_on_the_sheet_are_dropped_as_the_game_does() {
+        // 2 frames; the list names 0, 7, 1: frame 7 is dropped and the other two animate
+        let img = decode_png(&png(2, 4, |_, y| [y as u8, 0, 0, 255])).unwrap();
+        let meta = McMeta::parse(r#"{"animation":{"frames":[0,7,1]}}"#).unwrap();
+        let t = Texture::new(img.clone(), Some(&meta)).unwrap();
+        let a = t.animation.unwrap();
+        assert_eq!(a.frames.iter().map(|f| f.index).collect::<Vec<_>>(), [0, 1]);
+        assert_eq!(a.skipped_frames, 1);
+        // with one frame left the game does not animate at all: the texture is its first frame
+        let meta = McMeta::parse(r#"{"animation":{"frames":[1,9]}}"#).unwrap();
+        let t = Texture::new(img, Some(&meta)).unwrap();
+        assert!(t.animation.is_none());
+        assert_eq!(t.default_frame_index(), 0);
+        assert_eq!(t.frame_height, 2);
+    }
+
+    #[test]
+    fn numbers_in_a_mcmeta_may_be_written_16_0_but_not_out_of_range() {
+        let m =
+            McMeta::parse(r#"{"animation":{"width":16.0,"height":16,"frametime":2.0}}"#).unwrap();
+        let a = m.animation.unwrap();
+        assert_eq!((a.width, a.height, a.frametime), (Some(16), Some(16), 2));
+        for bad in [
+            r#"{"animation":{"width":16.5}}"#,
+            r#"{"animation":{"width":0}}"#,
+            r#"{"animation":{"frametime":-1}}"#,
+            r#"{"animation":{"width":4294967296}}"#,
+            r#"{"animation":{"frames":[-1]}}"#,
+            r#"{"animation":{"frames":[{"index":0,"time":0}]}}"#,
+            r#"{"animation":{"frames":[{"index":99999999999}]}}"#,
+        ] {
+            assert!(McMeta::parse(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]
@@ -557,10 +618,10 @@ mod tests {
             r#"{{"animation":{{"frames":[{}]}}}}"#,
             vec!["0"; MAX_FRAME_LIST + 1].join(",")
         );
-        let meta = McMeta::parse(list).unwrap();
-        assert!(Texture::new(img, Some(&meta))
+        assert!(McMeta::parse(list)
             .unwrap_err()
             .to_string()
             .contains("limit"));
+        let _ = img;
     }
 }

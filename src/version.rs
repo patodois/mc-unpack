@@ -198,7 +198,7 @@ pub fn detect(jar: &Jar, path: Option<&Path>) -> VersionInfo {
     let layout = detect_layout(jar);
     let json = read_version_json(jar);
     let (id, id_from) = match json.as_ref().and_then(|j| j.id.clone()) {
-        Some(id) => (id, IdSource::VersionJson),
+        Some(id) => (crate::jar::escape_control(&id), IdSource::VersionJson),
         None => match path.and_then(id_from_path) {
             Some(id) => (id, IdSource::Path),
             None => ("unknown".to_string(), IdSource::Unknown),

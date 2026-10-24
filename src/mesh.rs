@@ -3,9 +3,12 @@
 //! Both exporters (glTF and the rewrite-bridge provider) go through here, so they agree on the
 //! texture frame, the tint, the alpha class and the origin.
 
-use anyhow::{Context, Result};
+use std::collections::HashMap;
+use std::sync::Arc;
 
-use crate::assets::{Assets, BakedModel};
+use anyhow::{bail, Context, Result};
+
+use crate::assets::{Assets, BakedModel, MAX_BAKE_IMAGE_BYTES};
 use crate::bake::Quad;
 use crate::texture::{AlphaClass, Rgba};
 use crate::tint::TintSet;
@@ -43,7 +46,7 @@ impl Default for MeshOptions {
 #[derive(Clone, Debug)]
 pub struct Group {
     /// `block/stone`
-    pub texture: String,
+    pub texture: Arc<str>,
     pub tint_index: Option<u32>,
     /// The colour multiplied into the texture, if the index has one
     pub tint: Option<[u8; 3]>,
@@ -68,8 +71,19 @@ fn shift(q: &Quad, origin: Origin) -> Quad {
     q
 }
 
+/// What makes two quads share a material
+#[derive(Clone, PartialEq, Eq, Hash)]
+struct GroupKey {
+    texture: Arc<str>,
+    tint_index: Option<u32>,
+    tint: Option<[u8; 3]>,
+    force_translucent: bool,
+}
+
 pub fn build(assets: &Assets, model: &BakedModel, opts: &MeshOptions) -> Result<Vec<Group>> {
     let mut groups: Vec<Group> = Vec::new();
+    let mut index: HashMap<GroupKey, usize> = HashMap::new();
+    let mut image_bytes = 0usize;
     for part in &model.parts {
         for q in &part.quads {
             let tint = match q.tint_index {
@@ -79,38 +93,45 @@ pub fn build(assets: &Assets, model: &BakedModel, opts: &MeshOptions) -> Result<
                 },
                 None => None,
             };
-            let found = groups.iter_mut().find(|g| {
-                g.texture == q.texture
-                    && g.tint_index == q.tint_index
-                    && g.tint == tint
-                    && g.force_translucent == q.translucent
-            });
-            match found {
-                Some(g) => g.quads.push(shift(q, opts.origin)),
-                None => {
-                    let tex = assets
-                        .texture(&q.texture)
-                        .with_context(|| format!("{}: texture of a face", model.id))?;
-                    let img = match opts.frame {
-                        Some(f) => tex.frame(f % tex.sheet_frames())?,
-                        None => tex.default_frame(),
-                    };
-                    let alpha = img.alpha_class(q.translucent);
-                    let image = match tint {
-                        Some(c) => img.tinted(c),
-                        None => img,
-                    };
-                    groups.push(Group {
-                        texture: q.texture.clone(),
-                        tint_index: q.tint_index,
-                        tint,
-                        alpha,
-                        force_translucent: q.translucent,
-                        image,
-                        quads: vec![shift(q, opts.origin)],
-                    });
-                }
+            let key = GroupKey {
+                texture: q.texture.clone(),
+                tint_index: q.tint_index,
+                tint,
+                force_translucent: q.translucent,
+            };
+            if let Some(&g) = index.get(&key) {
+                groups[g].quads.push(shift(q, opts.origin));
+                continue;
             }
+            let tex = assets
+                .texture(&q.texture)
+                .with_context(|| format!("{}: texture of a face", model.id))?;
+            let img = match opts.frame {
+                Some(f) => tex.frame(f % tex.sheet_frames())?,
+                None => tex.default_frame(),
+            };
+            image_bytes += img.data.len();
+            if image_bytes > MAX_BAKE_IMAGE_BYTES {
+                bail!(
+                    "{}: its textures need more than {MAX_BAKE_IMAGE_BYTES} bytes of images",
+                    model.id
+                );
+            }
+            let alpha = img.alpha_class(q.translucent);
+            let image = match tint {
+                Some(c) => img.tinted(c),
+                None => img,
+            };
+            index.insert(key, groups.len());
+            groups.push(Group {
+                texture: q.texture.clone(),
+                tint_index: q.tint_index,
+                tint,
+                alpha,
+                force_translucent: q.translucent,
+                image,
+                quads: vec![shift(q, opts.origin)],
+            });
         }
     }
     Ok(groups)

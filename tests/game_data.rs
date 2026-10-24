@@ -160,7 +160,7 @@ fn grass_block_in_every_model_version() {
         let b = block(&a, name, state);
         // the base cube and the tinted side overlay: 6 + 4 faces
         assert_eq!(b.quad_count(), 10, "{v}");
-        let up = b.quads().find(|q| q.texture == top).unwrap();
+        let up = b.quads().find(|q| &*q.texture == top).unwrap();
         assert_eq!(up.tint_index, Some(0));
         assert_eq!(up.normal, [0.0, 1.0, 0.0]);
         let overlay: Vec<&Quad> = b
@@ -452,12 +452,18 @@ fn generated_items_are_one_pixel_thick_slabs() {
 }
 
 #[test]
-fn heavy_core_names_a_texture_that_does_not_exist_and_is_left_out() {
-    // Mojang's model writes `all` where `#all` was meant, in every face
-    let a = jar!("26.3");
-    let b = a.bake_block("heavy_core", &State::default()).unwrap();
-    assert!(b.is_empty());
-    assert_eq!(b.report.left_out, Some(LeftOut::MissingTexture));
+fn heavy_core_draws_its_six_faces() {
+    // Mojang's model writes `"texture": "all"`: in the game that is the slot `all`, as `#all`
+    // is, so it is a normal block, in every version that has the model
+    for v in ["1.21.1", "26.2", "26.3"] {
+        let a = jar!(v);
+        let b = a.bake_block("heavy_core", &State::default()).unwrap();
+        assert_eq!(b.quad_count(), 6, "{v}");
+        assert!(b.report.notes.is_empty(), "{v}: {:?}", b.report.notes);
+        assert!(b.quads().all(|q| &*q.texture == "block/heavy_core"), "{v}");
+        assert_eq!(a.classify_block("heavy_core").unwrap(), None);
+        assert_eq!(a.classify_item("heavy_core").unwrap(), None);
+    }
 }
 
 #[test]
@@ -551,6 +557,21 @@ fn multi_state_blocks_say_which_state_they_are() {
         assert!(l.iter().any(|i| i.id == "block/oak_stairs"
             && i.name
                 .contains("[facing=east,half=bottom,shape=inner_left]")));
+    }
+}
+
+#[test]
+fn multipart_conditions_with_alternatives_hold_in_every_version() {
+    // pink_petals' parts are written "2|3|4": every layout's negation rule must read that as a list
+    for v in ["1.20.1", "1.21.1", "26.3"] {
+        let a = jar!(v);
+        let b = block(&a, "pink_petals", "facing=north,flower_amount=3");
+        assert!(!b.is_empty(), "{v}");
+        assert!(
+            b.report.notes.iter().all(|n| !n.contains("mixes")),
+            "{v}: {:?}",
+            b.report.notes
+        );
     }
 }
 

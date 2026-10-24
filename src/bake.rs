@@ -21,9 +21,15 @@
 //!   is re-derived by laying it on the face plane, rotating it with the block, and reading it back
 //!   in the UV frame of the face it ended up on.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use anyhow::{bail, Result};
 
 use crate::model::{Axis, Dir, Element, ElementRotation, ResolvedModel};
+
+/// Maps a face's texture reference to its path and whether the data draws it translucent
+pub type ResolveTexture<'a> = dyn FnMut(&str) -> Result<(Arc<str>, bool)> + 'a;
 
 /// A quad in blocks, counter-clockwise from outside
 #[derive(Clone, Debug, PartialEq)]
@@ -33,7 +39,7 @@ pub struct Quad {
     /// 0..1 over one frame of the texture, v down
     pub uv: [[f32; 2]; 4],
     /// Relative to `textures/`: `block/stone`
-    pub texture: String,
+    pub texture: Arc<str>,
     pub tint_index: Option<u32>,
     /// The side this face hides against a neighbour (in the frame after the block is rotated)
     pub cullface: Option<Dir>,
@@ -50,6 +56,8 @@ pub struct Quad {
 pub struct VariantRotation {
     pub x: i32,
     pub y: i32,
+    /// Only 26.x blockstates have it (see [`crate::blockstate::Variant::z`])
+    pub z: i32,
     pub uvlock: bool,
 }
 
@@ -96,12 +104,16 @@ fn rot_axis(axis: Axis, deg: f64) -> M3 {
     }
 }
 
-/// The block rotation of a variant: `x` first, then `y`; positive `y` is clockwise seen from above
-/// and positive `x` tips the top toward north, which are right-handed turns by `-y` and `-x`
-fn variant_matrix(x: i32, y: i32) -> M3 {
+/// The block rotation of a variant: `x` first, then `y`, then `z`; positive `y` is clockwise seen
+/// from above and positive `x` tips the top toward north, which are right-handed turns by `-y` and
+/// `-x`; `z` is named the same way, so it is the right-handed turn by `-z`
+fn variant_matrix(x: i32, y: i32, z: i32) -> M3 {
     mul(
-        &rot_axis(Axis::Y, -(y as f64)),
-        &rot_axis(Axis::X, -(x as f64)),
+        &rot_axis(Axis::Z, -(z as f64)),
+        &mul(
+            &rot_axis(Axis::Y, -(y as f64)),
+            &rot_axis(Axis::X, -(x as f64)),
+        ),
     )
 }
 
@@ -206,59 +218,49 @@ fn unplane_uv(d: Dir, uv: [f64; 2]) -> V3 {
     }
 }
 
-/// `Rx * Ry * Rz`. The order is not in the data, only in the game's code, and the data cannot prove
-/// it: the two Euler rotations in the jars (`template_hanging_sign_rot_*`: x 180, y -67.5, z -180)
-/// come out the same for `Rx * Ry * Rz` and for `Rz * Ry * Rx`, which is all that can be said. So a
-/// rotation for which those two differ is refused, and the others are exact under either.
-fn euler_matrix(x: f64, y: f64, z: f64) -> Result<M3> {
-    let (rx, ry, rz) = (
-        rot_axis(Axis::X, x),
-        rot_axis(Axis::Y, y),
-        rot_axis(Axis::Z, z),
-    );
-    let xyz = mul(&mul(&rx, &ry), &rz);
-    let zyx = mul(&mul(&rz, &ry), &rx);
-    let diff = (0..3)
-        .flat_map(|i| (0..3).map(move |j| (i, j)))
-        .map(|(i, j)| (xyz[i][j] - zyx[i][j]).abs())
-        .fold(0.0, f64::max);
-    if diff > 1e-9 {
-        bail!(
-            "Euler rotation x {x}, y {y}, z {z}: the order of the three turns is in the game's code, not in the data, and the two likely orders disagree here"
-        );
-    }
-    Ok(xyz)
+/// The three Euler angles of a 26.x element rotation: a point is turned about X first, then about
+/// Y, then about Z, which is the matrix `Rz * Ry * Rx`
+fn euler_matrix(x: f64, y: f64, z: f64) -> M3 {
+    mul(
+        &rot_axis(Axis::Z, z),
+        &mul(&rot_axis(Axis::Y, y), &rot_axis(Axis::X, x)),
+    )
 }
 
-fn element_matrix(r: &ElementRotation) -> Result<(V3, M3, V3)> {
-    Ok(match r {
+/// The turn of an element, and the full transform with `rescale`: each axis is stretched (before
+/// the turn) by 1 / the largest component of where that axis ends up, so the turned element keeps
+/// its extent along the block's axes. Up to 45 degrees about one axis that is 1 / cos(angle).
+/// Nothing is stretched for no turn at all. Returns `(origin, turn, full transform)`.
+fn element_matrix(r: &ElementRotation) -> (V3, M3, M3) {
+    let (origin, turn, rescale) = match r {
         ElementRotation::Axis {
             origin,
             axis,
             angle,
             rescale,
-        } => {
-            let m = rot_axis(*axis, *angle);
-            let k = if *rescale {
-                let c = angle.to_radians().cos().abs();
-                if c < 0.5 {
-                    bail!("rescale with a {angle} degree turn is not defined (the game accepts -45 to 45)");
-                }
-                1.0 / c
-            } else {
-                1.0
-            };
-            let scale = match axis {
-                Axis::X => [1.0, k, k],
-                Axis::Y => [k, 1.0, k],
-                Axis::Z => [k, k, 1.0],
-            };
-            (*origin, m, scale)
+        } => (*origin, rot_axis(*axis, *angle), *rescale),
+        ElementRotation::Euler {
+            origin,
+            x,
+            y,
+            z,
+            rescale,
+        } => (*origin, euler_matrix(*x, *y, *z), *rescale),
+    };
+    let identity =
+        (0..3).all(|i| (0..3).all(|j| (turn[i][j] - if i == j { 1.0 } else { 0.0 }).abs() < 1e-12));
+    if !rescale || identity {
+        return (origin, turn, turn);
+    }
+    let mut full = turn;
+    for j in 0..3 {
+        // column j of the turn is where axis j points
+        let m = (0..3).map(|i| turn[i][j].abs()).fold(0.0, f64::max);
+        for row in full.iter_mut() {
+            row[j] /= m;
         }
-        ElementRotation::Euler { origin, x, y, z } => {
-            (*origin, euler_matrix(*x, *y, *z)?, [1.0; 3])
-        }
-    })
+    }
+    (origin, turn, full)
 }
 
 fn snap(v: f64) -> f32 {
@@ -272,27 +274,22 @@ fn snap(v: f64) -> f32 {
 pub fn bake_element(
     el: &Element,
     rot: VariantRotation,
-    resolve_tex: &mut dyn FnMut(&str) -> Result<(String, bool)>,
+    resolve_tex: &mut ResolveTexture,
     out: &mut Vec<Quad>,
     notes: &mut Vec<String>,
 ) -> Result<()> {
-    if rot.x % 90 != 0 || rot.y % 90 != 0 {
+    if rot.x % 90 != 0 || rot.y % 90 != 0 || rot.z % 90 != 0 {
         bail!(
-            "variant rotation x {} y {}: only quarter turns exist",
+            "variant rotation x {} y {} z {}: only quarter turns exist",
             rot.x,
-            rot.y
+            rot.y,
+            rot.z
         );
     }
-    let vm = variant_matrix(rot.x, rot.y);
-    let identity_variant = rot.x.rem_euclid(360) == 0 && rot.y.rem_euclid(360) == 0;
-    let erot = match el.rotation.as_ref().map(element_matrix).transpose() {
-        Ok(r) => r,
-        Err(e) => {
-            // the element is left out, the rest of the model is still good
-            notes.push(format!("an element was left out: {e:#}"));
-            return Ok(());
-        }
-    };
+    let vm = variant_matrix(rot.x, rot.y, rot.z);
+    let identity_variant = [rot.x, rot.y, rot.z].iter().all(|a| a.rem_euclid(360) == 0);
+    let erot = el.rotation.as_ref().map(element_matrix);
+    let mut no_area = 0usize;
     for (dir, face) in &el.faces {
         let (tex, translucent) = match resolve_tex(&face.texture) {
             Ok(t) => t,
@@ -315,13 +312,9 @@ pub fn bake_element(
         let mut pos = [[0.0; 3]; 4];
         for (i, p) in corner_pos.iter().enumerate() {
             let mut q = *p;
-            if let Some((origin, m, scale)) = &erot {
-                let r = apply(m, [q[0] - origin[0], q[1] - origin[1], q[2] - origin[2]]);
-                q = [
-                    origin[0] + r[0] * scale[0],
-                    origin[1] + r[1] * scale[1],
-                    origin[2] + r[2] * scale[2],
-                ];
+            if let Some((origin, _, full)) = &erot {
+                let r = apply(full, [q[0] - origin[0], q[1] - origin[1], q[2] - origin[2]]);
+                q = [origin[0] + r[0], origin[1] + r[1], origin[2] + r[2]];
             }
             if !identity_variant {
                 let r = apply(&vm, [q[0] - 8.0, q[1] - 8.0, q[2] - 8.0]);
@@ -331,8 +324,8 @@ pub fn bake_element(
         }
         // The face's direction after both rotations, for the normal and for uvlock
         let mut n = apply_i(*dir);
-        if let Some((_, m, _)) = &erot {
-            n = apply(m, n);
+        if let Some((_, turn, _)) = &erot {
+            n = apply(turn, n);
         }
         if !identity_variant {
             n = apply(&vm, n);
@@ -378,6 +371,7 @@ pub fn bake_element(
         let c2 = cross(e2, e3);
         let area = clen + norm(c2);
         if area < 1e-9 {
+            no_area += 1;
             continue;
         }
         let cull = face.cullface.map(|d| variant_dir(&vm, d)).transpose()?;
@@ -397,6 +391,11 @@ pub fn bake_element(
             translucent,
             light_emission: el.light_emission,
         });
+    }
+    if no_area > 0 {
+        notes.push(format!(
+            "{no_area} face(s) of an element have no area and were not emitted"
+        ));
     }
     Ok(())
 }
@@ -433,23 +432,34 @@ fn variant_dir(vm: &M3, d: Dir) -> Result<Dir> {
     .ok_or_else(|| anyhow::anyhow!("the variant rotation does not keep the axes"))
 }
 
+/// Resolves face texture references once per name: a model's faces repeat a few names, and every
+/// quad then shares one `Arc<str>` instead of owning a copy of the path
+#[derive(Default)]
+pub struct TextureNames {
+    seen: HashMap<String, (Arc<str>, bool)>,
+}
+
+impl TextureNames {
+    pub fn get(&mut self, model: &ResolvedModel, reference: &str) -> Result<(Arc<str>, bool)> {
+        if let Some(t) = self.seen.get(reference) {
+            return Ok(t.clone());
+        }
+        let t = model.texture(reference)?;
+        let v = (Arc::<str>::from(t.path), t.translucent);
+        self.seen.insert(reference.to_string(), v.clone());
+        Ok(v)
+    }
+}
+
 /// Bakes every element of a resolved model. The second value lists what was left out and why (a
-/// face whose texture reference cannot be resolved, an element whose rotation is ambiguous).
+/// face whose texture slot nothing defines, faces with no area).
 pub fn bake_model(model: &ResolvedModel, rot: VariantRotation) -> Result<(Vec<Quad>, Vec<String>)> {
     let mut out = Vec::new();
     let mut notes = Vec::new();
+    let mut names = TextureNames::default();
     for (i, el) in model.elements.iter().enumerate() {
-        bake_element(
-            el,
-            rot,
-            &mut |r| {
-                let t = model.texture(r)?;
-                Ok((t.path, t.translucent))
-            },
-            &mut out,
-            &mut notes,
-        )
-        .map_err(|e| e.context(format!("{} element {i}", model.id)))?;
+        bake_element(el, rot, &mut |r| names.get(model, r), &mut out, &mut notes)
+            .map_err(|e| e.context(format!("{} element {i}", model.id)))?;
     }
     for n in notes.iter_mut() {
         *n = format!("{}: {n}", model.id);
@@ -514,6 +524,7 @@ mod tests {
     const NONE: VariantRotation = VariantRotation {
         x: 0,
         y: 0,
+        z: 0,
         uvlock: false,
     };
 
@@ -638,6 +649,7 @@ mod tests {
             VariantRotation {
                 x: 0,
                 y: 90,
+                z: 0,
                 uvlock: false,
             },
         );
@@ -647,6 +659,7 @@ mod tests {
             VariantRotation {
                 x: 0,
                 y: 270,
+                z: 0,
                 uvlock: false,
             },
         );
@@ -661,6 +674,7 @@ mod tests {
             VariantRotation {
                 x: 90,
                 y: 0,
+                z: 0,
                 uvlock: false,
             },
         );
@@ -671,6 +685,7 @@ mod tests {
             VariantRotation {
                 x: 90,
                 y: 90,
+                z: 0,
                 uvlock: false,
             },
         );
@@ -680,6 +695,7 @@ mod tests {
             VariantRotation {
                 x: 180,
                 y: 0,
+                z: 0,
                 uvlock: false,
             },
         );
@@ -697,6 +713,7 @@ mod tests {
                     VariantRotation {
                         x,
                         y,
+                        z: 0,
                         uvlock: false,
                     },
                 ) {
@@ -777,6 +794,7 @@ mod tests {
                 x: 180.0,
                 y: 0.0,
                 z: 180.0,
+                rescale: false,
             }),
             &[(Dir::East, None, 0)],
         );
@@ -792,6 +810,7 @@ mod tests {
                 x: 0.0,
                 y: 90.0,
                 z: 0.0,
+                rescale: false,
             }),
             &[(Dir::East, None, 0)],
         );
@@ -815,6 +834,7 @@ mod tests {
                 VariantRotation {
                     x: 0,
                     y,
+                    z: 0,
                     uvlock: true,
                 },
             );
@@ -833,6 +853,7 @@ mod tests {
                 VariantRotation {
                     x: 0,
                     y,
+                    z: 0,
                     uvlock: false,
                 },
             );
@@ -855,6 +876,7 @@ mod tests {
             VariantRotation {
                 x: 0,
                 y: 90,
+                z: 0,
                 uvlock: true,
             },
         );
@@ -882,6 +904,7 @@ mod tests {
             VariantRotation {
                 x: 0,
                 y: 0,
+                z: 0,
                 uvlock: true,
             },
         );
@@ -897,6 +920,7 @@ mod tests {
             VariantRotation {
                 x: 0,
                 y: 90,
+                z: 0,
                 uvlock: false,
             },
         );
@@ -926,9 +950,21 @@ mod tests {
     fn faces_without_area_are_not_emitted() {
         // a flat plane written with a face for every side: only the two that have area are drawn
         let faces: Vec<_> = Dir::ALL.iter().map(|d| (*d, None, 0)).collect();
-        let q = bake(&el([0.0, 0.0, 8.0], [16.0, 16.0, 8.0], None, &faces), NONE);
-        let dirs: Vec<Dir> = q.iter().map(|q| q.face).collect();
+        let e = el([0.0, 0.0, 8.0], [16.0, 16.0, 8.0], None, &faces);
+        let (mut out, mut notes) = (Vec::new(), Vec::new());
+        bake_element(
+            &e,
+            NONE,
+            &mut |_| Ok(("t".into(), false)),
+            &mut out,
+            &mut notes,
+        )
+        .unwrap();
+        let dirs: Vec<Dir> = out.iter().map(|q| q.face).collect();
         assert_eq!(dirs, vec![Dir::North, Dir::South]);
+        // and the four that were dropped are counted in a note
+        assert_eq!(notes.len(), 1);
+        assert!(notes[0].starts_with("4 face(s)"), "{notes:?}");
     }
 
     #[test]
@@ -975,64 +1011,142 @@ mod tests {
                 x,
                 y,
                 z,
+                rescale: false,
             }),
             &[(Dir::Up, None, 0)],
         )
     }
 
     #[test]
-    fn a_mixed_euler_rotation_whose_order_matters_is_left_out_with_a_note() {
-        let mut out = Vec::new();
-        let mut notes = Vec::new();
-        bake_element(
-            &euler_el(30.0, 40.0, 50.0),
-            NONE,
-            &mut |_| Ok(("t".into(), false)),
-            &mut out,
-            &mut notes,
-        )
-        .unwrap();
-        assert!(out.is_empty());
-        assert!(notes[0].contains("order"), "{notes:?}");
-        // a single axis, and the hanging-sign combination of the real data (both orders agree), are kept
-        for e in [euler_el(0.0, 33.0, 0.0), euler_el(180.0, -67.5, -180.0)] {
-            let (mut out, mut notes) = (Vec::new(), Vec::new());
-            bake_element(
-                &e,
-                NONE,
-                &mut |_| Ok(("t".into(), false)),
-                &mut out,
-                &mut notes,
-            )
-            .unwrap();
-            assert_eq!(out.len(), 1, "{notes:?}");
-        }
+    fn euler_angles_turn_x_first_then_y_then_z() {
+        // up, turned 90 about X, is south (+Z); turned 90 about Y it is then east (+X). The other
+        // order (Y first, which leaves up where it is) would end on +Z.
+        let q = bake(&euler_el(90.0, 90.0, 0.0), NONE);
+        assert!(close(q[0].normal, [1.0, 0.0, 0.0]), "{:?}", q[0].normal);
+        // and z last: x 90 sends up to +Z, which z 90 leaves alone; z first would give west
+        let q = bake(&euler_el(90.0, 0.0, 90.0), NONE);
+        assert!(close(q[0].normal, [0.0, 0.0, 1.0]), "{:?}", q[0].normal);
     }
 
     #[test]
-    fn rescale_beyond_45_degrees_leaves_the_element_out_not_a_huge_scale() {
-        let e = el(
-            [0.0; 3],
-            [16.0; 3],
-            Some(ElementRotation::Axis {
-                origin: [8.0; 3],
-                axis: Axis::Y,
-                angle: 89.9,
-                rescale: true,
-            }),
-            &[(Dir::Up, None, 0)],
-        );
-        let (mut out, mut notes) = (Vec::new(), Vec::new());
-        bake_element(
+    fn the_hanging_sign_rotation_of_the_real_data_comes_out_right_and_is_kept() {
+        // x 180, y -67.5, z -180: a turn about Y by 180 + 67.5 degrees
+        let q = bake(&euler_el(180.0, -67.5, -180.0), NONE);
+        assert_eq!(q.len(), 1);
+        let a = (180.0f64 + 67.5).to_radians();
+        // up stays up; a corner at x = 8 from the centre goes round Y by that angle
+        assert!(close(q[0].normal, [0.0, 1.0, 0.0]), "{:?}", q[0].normal);
+        let p = q[0].pos[0]; // top-left of the up face: (from x, from z) = (-8, -8) from the origin
+        let (ox, oz) = (-8.0f64, -8.0f64);
+        let (ex, ez) = (ox * a.cos() + oz * a.sin(), -ox * a.sin() + oz * a.cos());
+        assert!(((p[0] as f64) - (8.0 + ex) / 16.0).abs() < 1e-5, "{p:?}");
+        assert!(((p[2] as f64) - (8.0 + ez) / 16.0).abs() < 1e-5, "{p:?}");
+    }
+
+    #[test]
+    fn variant_z_turns_east_down_and_comes_after_x_and_y() {
+        let e = el([0.0; 3], [16.0; 3], None, &[(Dir::East, None, 0)]);
+        let q = bake(
             &e,
-            NONE,
-            &mut |_| Ok(("t".into(), false)),
-            &mut out,
-            &mut notes,
-        )
-        .unwrap();
-        assert!(out.is_empty(), "{:?}", out);
-        assert!(notes[0].contains("rescale"), "{notes:?}");
+            VariantRotation {
+                x: 0,
+                y: 0,
+                z: 90,
+                uvlock: false,
+            },
+        );
+        assert!(close(q[0].normal, [0.0, -1.0, 0.0]), "{:?}", q[0].normal);
+        // x first, then z: up -> north, which z leaves alone; z first would send it east
+        let u = el([0.0; 3], [16.0; 3], None, &[(Dir::Up, None, 0)]);
+        let q = bake(
+            &u,
+            VariantRotation {
+                x: 90,
+                y: 0,
+                z: 90,
+                uvlock: false,
+            },
+        );
+        assert!(close(q[0].normal, [0.0, 0.0, -1.0]), "{:?}", q[0].normal);
+        // y then z: north -> east (y 90), east -> down (z 90)
+        let n = el([0.0; 3], [16.0; 3], None, &[(Dir::North, None, 0)]);
+        let q = bake(
+            &n,
+            VariantRotation {
+                x: 0,
+                y: 90,
+                z: 90,
+                uvlock: false,
+            },
+        );
+        assert!(close(q[0].normal, [0.0, -1.0, 0.0]), "{:?}", q[0].normal);
+        assert!(q[0].pos.iter().flatten().all(|c| *c == 0.0 || *c == 1.0));
+    }
+
+    #[test]
+    fn rescale_uses_the_largest_component_and_works_past_45_and_for_euler() {
+        // a flat plane 14.4 wide, turned 60 degrees about Y with rescale: x and z are stretched by
+        // 1 / max(|cos 60|, |sin 60|) before the turn
+        let mk = |rot| {
+            el(
+                [0.8, 0.0, 8.0],
+                [15.2, 16.0, 8.0],
+                Some(rot),
+                &[(Dir::South, None, 0)],
+            )
+        };
+        let axis = ElementRotation::Axis {
+            origin: [8.0; 3],
+            axis: Axis::Y,
+            angle: 60.0,
+            rescale: true,
+        };
+        let plain = ElementRotation::Axis {
+            origin: [8.0; 3],
+            axis: Axis::Y,
+            angle: 60.0,
+            rescale: false,
+        };
+        let k = 1.0 / 60f64.to_radians().sin();
+        let (a, b) = (bake(&mk(axis), NONE), bake(&mk(plain), NONE));
+        // the stretched plane's far corner is k times as far from the origin as the plain one's
+        let far = |q: &Quad| {
+            q.pos
+                .iter()
+                .map(|p| {
+                    (((p[0] - 0.5) * 16.0).powi(2) + ((p[2] - 0.5) * 16.0).powi(2)).sqrt() as f64
+                })
+                .fold(0.0, f64::max)
+        };
+        assert!(
+            (far(&a[0]) / far(&b[0]) - k).abs() < 1e-3,
+            "{} {}",
+            far(&a[0]),
+            far(&b[0])
+        );
+        // the Euler form with only y set agrees with the axis form
+        let eul = ElementRotation::Euler {
+            origin: [8.0; 3],
+            x: 0.0,
+            y: 45.0,
+            z: 0.0,
+            rescale: true,
+        };
+        let ax = ElementRotation::Axis {
+            origin: [8.0; 3],
+            axis: Axis::Y,
+            angle: 45.0,
+            rescale: true,
+        };
+        let (e, x) = (bake(&mk(eul), NONE), bake(&mk(ax), NONE));
+        for i in 0..4 {
+            assert!(
+                close(e[0].pos[i], x[0].pos[i]),
+                "{:?} {:?}",
+                e[0].pos,
+                x[0].pos
+            );
+        }
     }
 
     #[test]
@@ -1046,6 +1160,7 @@ mod tests {
             VariantRotation {
                 x: 45,
                 y: 0,
+                z: 0,
                 uvlock: true,
             },
             &mut |_| Ok(("t".into(), false)),

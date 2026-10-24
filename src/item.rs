@@ -27,10 +27,10 @@ use crate::tint::{color_from_json, ColormapKind, Tint};
 /// would be hundreds of thousands of strips.
 pub const MAX_LAYER_SIDE: u32 = 128;
 
-/// Most elements one generated layer may have (front, back and strips). The most any item in the
-/// eight jars needs is far below this (see `mc-unpack check`); a texture whose alpha is a
-/// checkerboard has one strip per pixel edge and goes over it.
-pub const MAX_LAYER_ELEMENTS: usize = 2048;
+/// Most elements one generated layer may have (the front and back slab, and a strip per pixel
+/// edge). The most any item in the eight jars needs is 259 (a diamond sword); this is 4 times that.
+/// A texture whose alpha is a checkerboard has one strip per pixel edge and goes over it.
+pub const MAX_LAYER_ELEMENTS: usize = 1_040;
 
 /// Added to each side of a layer's slab per layer index, in model units (1/16 block)
 pub const LAYER_SEPARATION: f64 = 0.005;
@@ -108,91 +108,50 @@ pub fn layer_elements(
             (Dir::South, face([0.0, 0.0, 16.0, 16.0], texture, layer)),
         ],
     });
-    // Strips along rows (up and down edges)
+    // One strip per pixel edge, as the game makes them (no merging into runs). Each strip's UV is
+    // its pixel shrunk by 0.1 texel on every side, so that filtering does not bleed the next pixel
+    // in. The outward direction is used for the face: the game labels the left and right strips
+    // with the opposite direction and draws them without culling, which changes only their shading.
+    const INSET: f64 = 0.1;
     for y in 0..h as i64 {
-        for (dir, dy) in [(Dir::Up, -1), (Dir::Down, 1)] {
-            let mut x = 0i64;
-            while x < w as i64 {
-                if op(x, y) && !op(x, y + dy) {
-                    let x0 = x;
-                    while x < w as i64 && op(x, y) && !op(x, y + dy) {
-                        x += 1;
-                    }
-                    let edge = if dir == Dir::Up {
-                        16.0 - y as f64 * fy
-                    } else {
-                        16.0 - (y + 1) as f64 * fy
-                    };
-                    if out.len() >= MAX_LAYER_ELEMENTS {
-                        return Err(too_many().into());
-                    }
-                    out.push(Element {
-                        from: [x0 as f64 * fx, edge, z0],
-                        to: [x as f64 * fx, edge, z1],
-                        rotation: None,
-                        shade: true,
-                        light_emission: 0,
-                        faces: vec![(
-                            dir,
-                            face(
-                                [
-                                    x0 as f64 * fx,
-                                    y as f64 * fy,
-                                    x as f64 * fx,
-                                    (y + 1) as f64 * fy,
-                                ],
-                                texture,
-                                layer,
-                            ),
-                        )],
-                    });
-                } else {
-                    x += 1;
-                }
+        for x in 0..w as i64 {
+            if !op(x, y) {
+                continue;
             }
-        }
-    }
-    // Strips along columns (left = west and right = east edges)
-    for x in 0..w as i64 {
-        for (dir, dx) in [(Dir::West, -1), (Dir::East, 1)] {
-            let mut y = 0i64;
-            while y < h as i64 {
-                if op(x, y) && !op(x + dx, y) {
-                    let y0 = y;
-                    while y < h as i64 && op(x, y) && !op(x + dx, y) {
-                        y += 1;
-                    }
-                    let edge = if dir == Dir::West {
-                        x as f64 * fx
-                    } else {
-                        (x + 1) as f64 * fx
-                    };
-                    if out.len() >= MAX_LAYER_ELEMENTS {
-                        return Err(too_many().into());
-                    }
-                    out.push(Element {
-                        from: [edge, 16.0 - y as f64 * fy, z0],
-                        to: [edge, 16.0 - y0 as f64 * fy, z1],
-                        rotation: None,
-                        shade: true,
-                        light_emission: 0,
-                        faces: vec![(
-                            dir,
-                            face(
-                                [
-                                    x as f64 * fx,
-                                    y0 as f64 * fy,
-                                    (x + 1) as f64 * fx,
-                                    y as f64 * fy,
-                                ],
-                                texture,
-                                layer,
-                            ),
-                        )],
-                    });
-                } else {
-                    y += 1;
+            for (dir, dx, dy) in [
+                (Dir::Up, 0, -1),
+                (Dir::Down, 0, 1),
+                (Dir::West, -1, 0),
+                (Dir::East, 1, 0),
+            ] {
+                if op(x + dx, y + dy) {
+                    continue;
                 }
+                if out.len() >= MAX_LAYER_ELEMENTS {
+                    return Err(too_many().into());
+                }
+                let (x0, x1) = (x as f64 * fx, (x + 1) as f64 * fx);
+                let (top, bottom) = (16.0 - y as f64 * fy, 16.0 - (y + 1) as f64 * fy);
+                let (from, to) = match dir {
+                    Dir::Up => ([x0, top, z0], [x1, top, z1]),
+                    Dir::Down => ([x0, bottom, z0], [x1, bottom, z1]),
+                    Dir::West => ([x0, bottom, z0], [x0, top, z1]),
+                    _ => ([x1, bottom, z0], [x1, top, z1]),
+                };
+                let uv = [
+                    (x as f64 + INSET) * fx,
+                    (y as f64 + INSET) * fy,
+                    (x as f64 + 1.0 - INSET) * fx,
+                    (y as f64 + 1.0 - INSET) * fy,
+                ];
+                out.push(Element {
+                    from,
+                    to,
+                    rotation: None,
+                    shade: true,
+                    light_emission: 0,
+                    faces: vec![(dir, face(uv, texture, layer))],
+                });
             }
         }
     }
@@ -466,10 +425,10 @@ mod tests {
     fn a_full_square_has_front_back_and_four_edges() {
         let o = opaque_from(16, 16, |_, _| true);
         let els = le(0, "#layer0", 16, 16, &o);
-        // front slab + one merged run per side
-        assert_eq!(els.len(), 1 + 4);
+        // the front slab, and a strip for every pixel edge on the border: 4 x 16
+        assert_eq!(els.len(), 1 + 64);
         let q = quads(&els);
-        assert_eq!(q.len(), 2 + 4);
+        assert_eq!(q.len(), 2 + 64);
         let faces: Vec<_> = q.iter().map(|q| q.face).collect();
         for d in [
             Dir::Up,
@@ -493,13 +452,13 @@ mod tests {
         let els = le(0, "#layer0", 16, 16, &o);
         let sides: Vec<_> = els.iter().skip(1).collect();
         assert_eq!(sides.len(), 4);
-        // the UV of each strip is that pixel
+        // the UV of each strip is that pixel, shrunk by a tenth of a texel on every side
         for s in &sides {
             let uv = s.faces[0].1.uv.unwrap();
-            assert_eq!(
-                [uv[0], uv[1], uv[2], uv[3]],
-                [5.0, 3.0, 6.0, 4.0],
-                "{:?}",
+            let want = [5.1, 3.1, 5.9, 3.9];
+            assert!(
+                uv.iter().zip(want).all(|(a, b)| (a - b).abs() < 1e-9),
+                "{:?}: {uv:?}",
                 s.faces[0].0
             );
         }
@@ -512,18 +471,19 @@ mod tests {
     }
 
     #[test]
-    fn interior_pixels_have_no_edges_and_runs_merge() {
+    fn interior_pixels_have_no_edges() {
         // a 3 x 3 block of pixels inside the texture
         let o = opaque_from(16, 16, |x, y| (4..7).contains(&x) && (4..7).contains(&y));
         let els = le(0, "#layer0", 16, 16, &o);
-        assert_eq!(els.len(), 1 + 4, "one merged run per side");
-        let up = els
+        // 4 sides of 3 pixels, one strip each, and none for the pixel in the middle
+        assert_eq!(els.len(), 1 + 12);
+        let ups: Vec<_> = els
             .iter()
             .skip(1)
-            .find(|s| s.faces[0].0 == Dir::Up)
-            .unwrap();
-        assert_eq!(up.from[0], 4.0);
-        assert_eq!(up.to[0], 7.0);
+            .filter(|s| s.faces[0].0 == Dir::Up)
+            .collect();
+        assert_eq!(ups.len(), 3);
+        assert!(ups.iter().all(|u| (u.to[0] - u.from[0] - 1.0).abs() < 1e-9));
     }
 
     #[test]
@@ -534,8 +494,8 @@ mod tests {
         });
         let els = le(0, "#layer0", 16, 16, &o);
         let dirs: Vec<Dir> = els.iter().skip(1).map(|e| e.faces[0].0).collect();
-        // 4 outer runs + 4 hole edges
-        assert_eq!(dirs.len(), 8);
+        // 4 x 5 on the outside + 4 round the hole
+        assert_eq!(dirs.len(), 24);
     }
 
     #[test]

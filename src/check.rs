@@ -21,7 +21,7 @@ use std::time::Instant;
 use anyhow::{bail, Result};
 
 use crate::assets::{Assets, LeftOut};
-use crate::bake::{bake_model, VariantRotation};
+use crate::bake::bake_model;
 use crate::blockstate::BlockState;
 use crate::model::{Builtin, RawModel};
 use crate::texture::{decode_png, McMeta, Texture};
@@ -66,8 +66,6 @@ pub struct Report {
     pub item_templates: u64,
     pub quads: u64,
     pub failures: Vec<String>,
-    /// Things in Mojang's files that are wrong and that the game tolerates; not counted as failures
-    pub upstream_defects: Vec<String>,
     /// Faces and elements left out inside models that otherwise bake (a texture variable nothing
     /// defines, a rotation whose order the data does not give): each is a line, not a failure
     pub left_out_inside_models: Vec<String>,
@@ -80,6 +78,11 @@ pub struct Report {
     pub max_sheet_frames: u32,
     pub max_frame_list: usize,
     pub max_item_quads: usize,
+    /// The most one bake held: models, quads, and bytes of first-frame images (blocks: one
+    /// variant, or every part of a multipart block at once, which is more than any one state)
+    pub max_bake_parts: usize,
+    pub max_bake_quads: usize,
+    pub max_bake_image_bytes: usize,
     pub seconds: f64,
 }
 
@@ -88,7 +91,8 @@ const MAX_LISTED: usize = 60;
 impl Report {
     fn fail(&mut self, what: &str, name: &str, e: impl std::fmt::Display) {
         if self.failures.len() < MAX_LISTED {
-            self.failures.push(format!("{what} {name}: {e:#}"));
+            self.failures
+                .push(crate::jar::escape_control(&format!("{what} {name}: {e:#}")));
         }
     }
 
@@ -138,6 +142,8 @@ pub fn run(a: &Assets) -> Result<Report> {
     if a.layout().has_json_models() {
         check_models(a, &mut r);
     }
+    r.left_out_inside_models.sort();
+    r.left_out_inside_models.dedup();
     r.seconds = start.elapsed().as_secs_f64();
     Ok(r)
 }
@@ -270,8 +276,34 @@ fn check_models(a: &Assets, r: &mut Report) {
     for n in a.block_names() {
         let Ok(bs) = a.blockstate(&n) else { continue };
         let mut inside = Vec::new();
-        let res = bake_all_variants(a, &bs, &mut r.quads, &mut referenced, &mut inside);
+        let mut per_model = Vec::new();
+        let res = bake_all_variants(
+            a,
+            &bs,
+            &mut r.quads,
+            &mut referenced,
+            &mut inside,
+            &mut per_model,
+        );
         r.left_out_inside_models.extend(inside);
+        // The most one bake of this block can hold: one variant, or every part at once
+        let (parts, quads) = if bs.is_multipart() {
+            (
+                per_model.len(),
+                per_model.iter().map(|m| m.0).sum::<usize>(),
+            )
+        } else {
+            (1, per_model.iter().map(|m| m.0).max().unwrap_or(0))
+        };
+        r.max_bake_parts = r.max_bake_parts.max(parts);
+        r.max_bake_quads = r.max_bake_quads.max(quads);
+        let mut tex: BTreeSet<&str> = BTreeSet::new();
+        for (_, t) in &per_model {
+            tex.extend(t.iter().map(|s| s.as_str()));
+        }
+        r.max_bake_image_bytes = r
+            .max_bake_image_bytes
+            .max(image_bytes(a, tex.iter().copied()));
         match res {
             Ok(None) => r.blocks.ok += 1,
             Ok(Some(lo)) => {
@@ -315,6 +347,11 @@ fn check_models(a: &Assets, r: &mut Report) {
                 r.items.ok += 1;
                 r.quads += b.quad_count() as u64;
                 r.max_item_quads = r.max_item_quads.max(b.quad_count());
+                r.max_bake_parts = r.max_bake_parts.max(b.parts.len());
+                r.max_bake_quads = r.max_bake_quads.max(b.quad_count());
+                r.max_bake_image_bytes = r
+                    .max_bake_image_bytes
+                    .max(image_bytes(a, b.texture_paths().into_iter()));
                 if !b.parts.is_empty() && !b.report.dropped_parts.is_empty() {
                     r.items_partial += 1;
                 }
@@ -329,7 +366,7 @@ fn check_models(a: &Assets, r: &mut Report) {
                         .cloned(),
                 );
                 for q in b.quads() {
-                    referenced.insert(q.texture.clone());
+                    referenced.insert(q.texture.to_string());
                 }
                 if let Some(lo) = b.report.left_out {
                     r.items_left_out
@@ -347,16 +384,18 @@ fn check_models(a: &Assets, r: &mut Report) {
     // Every texture a face uses has to exist and decode (the pass above only counted PNGs)
     for t in &referenced {
         if let Err(e) = a.texture(t) {
-            // A name with no folder (`all` instead of `#all`) cannot be a texture: the game reads
-            // it as a missing texture and goes on. That is a defect in Mojang's file, not here.
-            if !t.contains('/') {
-                r.upstream_defects.push(format!("a face names texture `{t}`, which cannot exist (a `#` is missing?); the game draws its missing-texture pattern"));
-            } else {
-                r.blocks.failed += 1;
-                r.fail("texture of a face", t, e);
-            }
+            r.blocks.failed += 1;
+            r.fail("texture of a face", t, e);
         }
     }
+}
+
+/// Bytes of the first frames of these textures, as RGBA (what a mesh built from them carries)
+fn image_bytes<'a>(a: &Assets, textures: impl Iterator<Item = &'a str>) -> usize {
+    textures
+        .filter_map(|t| a.texture(t).ok())
+        .map(|t| t.frame_width as usize * t.frame_height as usize * 4)
+        .sum()
 }
 
 fn bake_all_variants(
@@ -365,6 +404,7 @@ fn bake_all_variants(
     quads: &mut u64,
     referenced: &mut BTreeSet<String>,
     inside: &mut Vec<String>,
+    per_model: &mut Vec<(usize, Vec<String>)>,
 ) -> Result<Option<LeftOut>> {
     let mut drawn = false;
     let mut first_left_out = None;
@@ -375,19 +415,17 @@ fn bake_all_variants(
             first_left_out.get_or_insert(lo);
             continue;
         }
-        let (q, face_notes) = bake_model(
-            &m,
-            VariantRotation {
-                x: v.x,
-                y: v.y,
-                uvlock: v.uvlock,
-            },
-        )?;
+        let (q, face_notes) = bake_model(&m, a.variant_rotation_of(v))?;
         inside.extend(face_notes);
         *quads += q.len() as u64;
+        let mut tex: Vec<String> = Vec::new();
         for quad in &q {
-            referenced.insert(quad.texture.clone());
+            referenced.insert(quad.texture.to_string());
+            if !tex.iter().any(|t| **t == *quad.texture) {
+                tex.push(quad.texture.to_string());
+            }
         }
+        per_model.push((q.len(), tex));
         drawn |= !q.is_empty();
     }
     if drawn {

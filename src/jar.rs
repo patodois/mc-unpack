@@ -41,6 +41,25 @@ pub struct Jar {
     index: HashMap<String, usize>,
     names: Vec<String>,
     path: Option<PathBuf>,
+    skipped_names: usize,
+}
+
+fn is_unsafe_char(c: char) -> bool {
+    c.is_control() || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+}
+
+/// `s` with control and direction-override characters written out (`\u{1b}`), for printing text
+/// that came from a jar (a name inside a JSON file, a version id) to a terminal
+pub fn escape_control(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if is_unsafe_char(c) {
+            out.push_str(&c.escape_unicode().to_string());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 impl Jar {
@@ -61,7 +80,14 @@ impl Jar {
         let zip = ZipArchive::new(r)?;
         let mut index = HashMap::with_capacity(zip.len());
         let mut names = Vec::with_capacity(zip.len());
+        let mut skipped = 0;
         for (i, n) in zip.file_names().enumerate() {
+            // A name with a control or direction-override character is never a game asset, and
+            // printed to a terminal it could rewrite what the user reads: it is not indexed
+            if n.chars().any(is_unsafe_char) {
+                skipped += 1;
+                continue;
+            }
             index.insert(n.to_string(), i);
             names.push(n.to_string());
         }
@@ -71,8 +97,14 @@ impl Jar {
             zip: Mutex::new(zip),
             index,
             names,
+            skipped_names: skipped,
             path: None,
         })
+    }
+
+    /// Entries left out of the index because their names hold control characters
+    pub fn skipped_names(&self) -> usize {
+        self.skipped_names
     }
 
     pub fn path(&self) -> Option<&Path> {

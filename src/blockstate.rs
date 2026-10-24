@@ -24,6 +24,9 @@ pub struct Variant {
     /// Rotation about X in degrees, a multiple of 90 in 0..360
     pub x: i32,
     pub y: i32,
+    /// 26.x blockstates may turn about Z too (none of the jars here do); the game applies x, then
+    /// y, then z. Older versions only know x and y: [`crate::assets::Assets`] leaves `z` out there
+    pub z: i32,
     pub uvlock: bool,
     pub weight: u32,
 }
@@ -105,6 +108,21 @@ pub struct Selection<'a> {
     pub ignored: Vec<String>,
     /// How many `variants` keys fit the state (more than one: it was partial and the first won)
     pub candidates: usize,
+    /// Conditions this crate would not decide, and why (see [`NegationRule`])
+    pub notes: Vec<String>,
+}
+
+/// How a `!` in a multipart condition value works. It differs between versions of the game:
+/// 1.8 to 1.12 read a leading `!` as "not any of what follows" (`!a|b` is neither `a` nor `b`);
+/// 26.x negates each term on its own (`!a|b` is "not `a`, or `b`"). A value with one term reads the
+/// same either way. The jars between (1.13 to 1.21.3) are not confirmed, so there a negation
+/// combined with `|` is refused: the part does not apply, and a note says so. None of the jars
+/// here has a `!` anywhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NegationRule {
+    WholeValue,
+    PerTerm,
+    RefuseMixed,
 }
 
 impl BlockState {
@@ -286,6 +304,11 @@ impl BlockState {
     /// - **multipart**: every part without `when`, and every part whose `when` holds. A property
     ///   missing from `state` never matches a positive condition (and always matches a negated one).
     pub fn select(&self, state: &State) -> Result<Selection<'_>> {
+        self.select_with(state, NegationRule::PerTerm)
+    }
+
+    /// [`BlockState::select`] with the version's rule for `!`
+    pub fn select_with(&self, state: &State, rule: NegationRule) -> Result<Selection<'_>> {
         // A property the file never mentions cannot choose anything. A state made only of such
         // properties is the empty state: the default is used and the properties are listed.
         let (state, ignored) = self.split_known(state);
@@ -332,13 +355,15 @@ impl BlockState {
                 key: Some(key.clone()),
                 ignored,
                 candidates,
+                notes: Vec::new(),
             });
         }
         let mut chosen = Vec::new();
+        let mut notes = Vec::new();
         for p in &self.multipart {
             let ok = match &p.when {
                 None => true,
-                Some(w) => eval_when(w, state),
+                Some(w) => eval_when(w, state, rule, &mut notes),
             };
             if ok {
                 if let Some(v) = p.apply.first() {
@@ -351,6 +376,7 @@ impl BlockState {
             key: None,
             ignored,
             candidates: 1,
+            notes,
         })
     }
 }
@@ -391,6 +417,7 @@ fn parse_variant(v: &Value) -> Result<Variant> {
         model,
         x: rot("x")?,
         y: rot("y")?,
+        z: rot("z")?,
         uvlock: match o.get("uvlock") {
             None | Some(Value::Null) => false,
             Some(Value::Bool(b)) => *b,
@@ -448,18 +475,41 @@ fn props(o: &Map<String, Value>) -> Result<When> {
     Ok(When::Props(v))
 }
 
-fn eval_when(w: &When, state: &State) -> bool {
+fn eval_when(w: &When, state: &State, rule: NegationRule, notes: &mut Vec<String>) -> bool {
     match w {
-        When::Or(l) => l.iter().any(|x| eval_when(x, state)),
-        When::And(l) => l.iter().all(|x| eval_when(x, state)),
+        When::Or(l) => l.iter().any(|x| eval_when(x, state, rule, notes)),
+        When::And(l) => l.iter().all(|x| eval_when(x, state, rule, notes)),
         When::Props(p) => p.iter().all(|(k, spec)| {
-            let (neg, alts) = match spec.strip_prefix('!') {
-                Some(r) => (true, r),
-                None => (false, spec.as_str()),
-            };
-            match state.0.get(k) {
-                None => neg,
-                Some(have) => alts.split('|').any(|a| a == have) != neg,
+            let terms: Vec<&str> = spec.split('|').collect();
+            let have = state.0.get(k);
+            let hit = |t: &str| have.is_some_and(|h| h == t);
+            match rule {
+                NegationRule::WholeValue => {
+                    let (neg, rest) = match spec.strip_prefix('!') {
+                        Some(r) => (true, r),
+                        None => (false, spec.as_str()),
+                    };
+                    let any = rest.split('|').any(hit);
+                    // a property the state lacks matches nothing, so its negation holds
+                    any != neg
+                }
+                NegationRule::PerTerm => terms.iter().any(|t| match t.strip_prefix('!') {
+                    Some(n) => !hit(n),
+                    None => hit(t),
+                }),
+                NegationRule::RefuseMixed => {
+                    if terms.len() > 1 && terms.iter().any(|t| t.starts_with('!')) {
+                        notes.push(format!(
+                            "the condition `{k}: {spec}` mixes `!` with `|`, which these versions of the game are not confirmed to read one way: the part does not apply"
+                        ));
+                        return false;
+                    }
+                    match spec.strip_prefix('!') {
+                        Some(n) => !hit(n),
+                        // plain alternatives (`2|3|4`): any of them
+                        None => terms.iter().any(|t| hit(t)),
+                    }
+                }
             }
         }),
     }
@@ -652,5 +702,80 @@ mod tests {
         ] {
             assert!(BlockState::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn plain_alternatives_work_under_every_negation_rule() {
+        // `2|3|4` has no `!`: all three rules read it as "any of these" (pink_petals in 1.20 and
+        // 1.21 writes its conditions that way)
+        let b =
+            BlockState::parse(r#"{"multipart":[{"when":{"n":"2|3|4"},"apply":{"model":"m"}}]}"#)
+                .unwrap();
+        for rule in [
+            NegationRule::WholeValue,
+            NegationRule::PerTerm,
+            NegationRule::RefuseMixed,
+        ] {
+            for (n, want) in [("1", 0), ("2", 1), ("4", 1)] {
+                let s = b
+                    .select_with(&State::parse(&format!("n={n}")).unwrap(), rule)
+                    .unwrap();
+                assert_eq!(s.chosen.len(), want, "{rule:?} n={n}");
+                assert!(s.notes.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn z_is_read_from_a_variant() {
+        let b =
+            BlockState::parse(r#"{"variants":{"":{"model":"m","x":90,"y":180,"z":270}}}"#).unwrap();
+        let v = &b.variants[0].1[0];
+        assert_eq!((v.x, v.y, v.z), (90, 180, 270));
+        assert_eq!(
+            BlockState::parse(r#"{"variants":{"":{"model":"m"}}}"#)
+                .unwrap()
+                .variants[0]
+                .1[0]
+                .z,
+            0
+        );
+        assert!(BlockState::parse(r#"{"variants":{"":{"model":"m","z":45}}}"#).is_err());
+    }
+
+    #[test]
+    fn the_two_negation_rules_differ_only_when_a_value_has_alternatives() {
+        let b = BlockState::parse(
+            r#"{"multipart":[{"when":{"p":"!a|b"},"apply":{"model":"m"}},{"when":{"q":"!a"},"apply":{"model":"n"}}]}"#,
+        )
+        .unwrap();
+        let hit = |rule, s: &str| -> Vec<String> {
+            b.select_with(&State::parse(s).unwrap(), rule)
+                .unwrap()
+                .chosen
+                .iter()
+                .map(|v| v.model.clone())
+                .collect()
+        };
+        // a single negated term reads the same either way
+        for rule in [
+            NegationRule::WholeValue,
+            NegationRule::PerTerm,
+            NegationRule::RefuseMixed,
+        ] {
+            assert_eq!(hit(rule, "q=b,p=a"), ["n"]);
+            assert!(hit(rule, "q=a,p=a").is_empty());
+        }
+        // `!a|b`: whole value = neither; per term = not a, or b
+        assert_eq!(hit(NegationRule::WholeValue, "p=c,q=a"), ["m"]);
+        assert!(hit(NegationRule::WholeValue, "p=b,q=a").is_empty());
+        assert_eq!(hit(NegationRule::PerTerm, "p=b,q=a"), ["m"]);
+        assert_eq!(hit(NegationRule::PerTerm, "p=c,q=a"), ["m"]);
+        assert!(hit(NegationRule::PerTerm, "p=a,q=a").is_empty());
+        let s = b
+            .select_with(&State::parse("p=c,q=a").unwrap(), NegationRule::RefuseMixed)
+            .unwrap();
+        assert!(s.chosen.is_empty());
+        assert_eq!(s.notes.len(), 1);
     }
 }
