@@ -99,6 +99,7 @@ mc-unpack model item/diamond_sword -o out/  # a flat item, as a one-pixel slab
 mc-unpack texture block/water_still --frames -o out/   # every frame of an animated texture
 mc-unpack tint grass --biome plains         # the colormap lookup: #91bd59
 mc-unpack tint foliage --temperature 0.8 --downfall 0.4
+mc-unpack inspect block/oak_stairs          # which state was used, what was ignored, every note, what was left out
 mc-unpack check                             # parse and bake everything in every jar found
 mc-unpack check-bridge                      # load everything through the Provider
 mc-unpack check-conformance --filter stairs # the bridge's conformance checker
@@ -106,12 +107,23 @@ mc-unpack check-conformance --filter stairs # the bridge's conformance checker
 
 `--mc-version <v>` picks one installed version; without it, commands that read one jar use the newest fully supported
 one. `--jar <path>` reads any jar. Output of `model` is `<name>.gltf`, `<name>.bin` and one PNG per distinct image
-(`--name` sets the stem, `--frame N` picks a frame of animated textures, `--corner-origin` keeps the game's origin).
+(`--name` sets the stem, `--frame N` picks a sheet frame of animated textures instead of the first one the animation
+shows, `--corner-origin` keeps the game's origin).
 
-**Ids.** `block/<name>[?variant=<state>]` and `item/<name>`, where `<name>` is the file name in the jar. The default state of
-a block is the blockstate file's `normal` (or empty) entry, else its first entry: the game's own default state is in code.
-For a multipart block that needs properties (redstone wire), the first state its own conditions describe. A property the
-file does not mention (`power`) is ignored and `model` says so. A partial state takes the first variant that fits.
+**Ids.** `block/<name>[?variant=<state>]` and `item/<name>`, where `<name>` is the file name in the jar.
+
+**Which state a block is.** The game's own default state is in code, so the data does not say. With no state, a block is the
+blockstate file's `normal` (or empty) entry, else **its first entry**: `block/oak_stairs` is
+`facing=east,half=bottom,shape=inner_left` (the first of 40 in 26.3), not a straight stair. For a multipart block that
+needs properties (redstone wire), it is the first state its own conditions describe. A property the file does not mention
+(`power`, `waterlogged`) is ignored and listed; a state made only of such properties is the default. A partial state takes
+the first entry that fits. Where this is visible:
+- `mc-unpack list <name> --states` marks the entry `block/<name>` builds, and `mc-unpack inspect <id>` prints the state
+  used, what was ignored, every note and what was left out;
+- the Provider has no channel for notes (rewrite-bridge 0.2 has only the model), so it puts the answer in two names that
+  it does control: `Model::name` is the id that reproduces the model (`block/oak_stairs?variant=facing=east,half=bottom,shape=inner_left`
+  when no state was given), and `AssetInfo::name` in `list` is `oak_stairs [facing=east,half=bottom,shape=inner_left]` for a
+  block with several states (the `id` stays `block/oak_stairs`). `Minecraft::load_report` returns the full notes.
 
 **Time and memory** (release build, 16 GB Apple silicon Mac, 23 to 24 October 2026): `check` over all eight jars takes 1.3 s
 and peaks at 86 MB; `check-bridge` 0.1 s per jar; `check-conformance` on 26.3 (2,784 assets) a few seconds.
@@ -129,8 +141,13 @@ In short:
   With no `uv`, the rectangle is the element's own extent projected on the face (a half-height slab's side shows the lower
   half of the texture).
 - **Element rotation.** Right-handed about the axis through `origin`; `rescale` then stretches the other two axes by
-  1 / cos(angle). 26.x also writes `{x, y, z, origin}`, composed `Rx * Ry * Rz` (the only two uses in the jars checked
-  do not depend on the order). A face with no area (the side faces of a flat element) is not emitted.
+  1 / cos(angle), defined up to 45 degrees (the game accepts -45 to 45): beyond that the element is left out with a note,
+  never a huge scale. 26.x also writes `{x, y, z, origin}`, composed `Rx * Ry * Rz`. **That order is the game's code, not the
+  data**, and the data cannot prove it: the only two Euler rotations in the jars (`template_hanging_sign_rot_*`: x 180,
+  y -67.5, z -180) give the same result for `Rx * Ry * Rz` and for `Rz * Ry * Rx`, which is all that can be said. A rotation
+  for which those two differ is refused (the element is left out, with a note) instead of guessed. A face with no area (the
+  side faces of a flat element) is not emitted. A face whose `#texture` nothing defines is left out with a note, like
+  `heavy_core`'s: the game draws its built-in missing-texture pattern there.
 - **Variant rotation.** `x` first, then `y`, about the block centre: `y: 90` turns north to east (clockwise from above),
   `x: 90` turns up to north. **`uvlock`**: a corner's UV is re-derived by laying it on its face plane, rotating it with the
   block, and reading it back in the UV frame of the face it ended on. Checked against real stairs: with `uvlock` the same world
@@ -139,18 +156,36 @@ In short:
   name the game does not know (Mojang's own `scaffolding_unstable` says `bottom`) means none, as in the game.
 - **Textures.** A texture's `.mcmeta` `animation` says frame size (given, else the shorter side), the frame order and time
   per frame (`frames`, else every frame of the sheet in order), `interpolate`. UVs refer to **one frame**, so a model draws a
-  frame, not the sheet. Frame 0 of the sheet is the default.
+  frame, not the sheet. The default is **the first frame the animation lists** (`fire_0` lists 16 first, so that is not
+  sheet frame 0); a texture without `frames` starts at sheet frame 0.
+- **What the format defaults, and what is required.** Read as the format defines them, not as this crate guesses: `weight` 1,
+  `uvlock` false, `x`/`y` 0, element `shade` true, face `rotation` 0, no `cullface`, no `tintindex`, a rotation's `rescale`
+  false, `frametime` 1 and `interpolate` false in a `.mcmeta`. Required, because the data always gives them (an error where
+  they are missing): a rotation's `origin` (all 303 in 26.3 have one) and, in the Euler form, all of `x`, `y` and `z`; the
+  `temperature` and `downfall` of a `grass` item tint (without them the tint is left uncoloured, with a note). `from` and
+  `to` must lie in -16 to 32, the range the game accepts, and every number must be finite; a face `rotation` or `tintindex`
+  written `90.0` is read as 90, anything that is not a whole number is an error, never a silent 0.
 - **Generated items.** For each `layerN` texture: a front and a back face over the whole square at z 7.5 to 8.5, and a
   one-pixel-wide strip on every edge where an opaque pixel (alpha above 0 in some frame) meets a transparent one or the border,
-  merged along runs, each strip showing its pixel's texels. Layer N carries `tintindex` N. The one liberty: layers above the
+  merged along runs, each strip showing its pixel's texels (the back face's u runs the other way, `[16 0 0 16]`, so that it
+  samples the same texel as the front at the same x). **Opacity is the union over the frames** of an animated item texture,
+  and the mesh is built once from it; the game builds spans per frame, so for an animated item texture this can differ
+  (none of the items in the eight jars animates by `.mcmeta`; the clock and compass are chosen by code). A layer over 128 x 128
+  pixels, or needing more than 2,048 elements (a checkerboard alpha has one strip per pixel edge), is **refused**: left out,
+  with the reason (the most any item in the jars needs is 204 quads). Layer N carries `tintindex` N. The one liberty: layers above the
   first are made 0.005 units thicker per layer so coplanar layers do not z-fight in a viewer (the game draws them in order).
 - **Item definitions** (1.21.4 and later) are walked to their **default branch**: `model` is itself, `composite` is all of its
-  models, `condition` takes `on_false`, `select` and `range_dispatch` take `fallback` (else the first case), `special` is
-  drawn by code and left out. What was chosen is in the model's notes. `tints` are read: `constant` is the colour, `grass`
-  is a colormap lookup, a dynamic tint (dye, potion) uses its `default` when the data gives one.
+  models, `condition` takes `on_false`, `select` and `range_dispatch` take `fallback` (else the first case). A judgment call worth knowing:
+  a `select` on `display_context` (26 items: bundles, spears, the spyglass ...) names the contexts where the item is a flat
+  sprite (`gui`, `ground`, `fixed`, `on_shelf`) and keeps the model for **every other context** as its fallback, so
+  `item/spyglass` is the in-hand model, not the flat icon; the note says which contexts the cases name. `special` is drawn by code and left out. What was chosen is in the
+  model's notes, and so is every part left out of a composite (`dropped_parts`) or failed (`failed_parts`, which `check` counts). `tints` are read: `constant` is the colour, `grass`
+  is a colormap lookup, a dynamic tint (dye, potion) uses its `default` when the data gives one, else nothing, with a note. An unreadable `constant` value is left uncoloured, with a note.
 - **Generated textures.** The armor-trim layers of 1.20 and later items (`trims/items/boots_trim_amethyst`) have no PNG: the
   game makes them from `atlases/armor_trims.json` (`paletted_permutations`). They are produced the same way here: a base
-  texel that equals a colour of the palette key is replaced by the same position in the other palette, alpha kept.
+  texel that equals a colour of the palette key is replaced by the same position in the other palette, alpha kept. What the
+  game does in the awkward cases is not in the data, so palettes of different sizes, a colour twice in the key, and any
+  transparent palette colour are **refused** (the item layer is left out, with the reason) instead of truncated or guessed.
 
 ## Tints
 
@@ -227,7 +262,10 @@ some: 1,090 for 1.12.2, 2,465 for 1.20.1, 2,784 for 26.3. Block entities and the
 | 26.2 | 3,855 | 176 | 1,198 | 2,657 | 1,271 | 1,537 | 1,198 | 1,537 | 0 |
 | 26.3 | 3,964 | 218 | 1,288 | 2,883 | 1,309 | 1,658 | 1,288 | 1,658 | 0 |
 
-Every number above is a file that parsed or baked. Things that needed a decision, each found by `check` failing first:
+Every number above is a file that parsed or baked. `check` also counts, apart from failures: faces and elements left out inside
+models that otherwise bake (2 in 1.21.1, 26.2 and 26.3: `heavy_core` and its item), items that lost a part to code or a
+refusal (0 in the jars here), and the upstream defects below. A composite item with one part that fails to bake (a missing
+texture) counts as **failed**, not ok. Things that needed a decision, each found by `check` failing first:
 
 - `scaffolding_unstable` (1.19 to 1.21.1) names the cull face `bottom`: read as none, as the game does.
 - 250 armor-trim items in 1.20.1 and 1.21.1 name textures with no PNG: generated from the atlas definition (above).
@@ -235,6 +273,25 @@ Every number above is a file that parsed or baked. Things that needed a decision
   built-in missing-texture pattern, which is code. The faces are left out, the block and item are listed as left out, and `check`
   prints the upstream defect without counting it as a failure.
 - "item templates" (`item/generated`, `item/handheld`, ...) are models other models inherit from, not items.
+
+### Limits
+
+A jar is read as untrusted input. The sizes below were measured on the eight jars on this machine, and each limit is a
+multiple of what a real jar needs (`check` prints the biggest it met next to the limit):
+
+| What | Limit | Biggest in the jars |
+|------|-------|---------------------|
+| a JSON or `.mcmeta` entry (parsed into a tree, several times its size) | 128 KiB | 24,324 bytes (`items/clock.json`, 26.3) |
+| a PNG entry | 8 MiB | 125 KB |
+| pixels of a PNG, from its header, before decoding | 2048 x 2048 | 512 x 512 (a GUI image; block and item textures: 16 x 16 to 16 x 1024) |
+| frames in a texture sheet | 4,096 | 64 |
+| steps in an animation's `frames` list | 4,096 | 64 |
+| size of a generated item layer, and its elements | 128 x 128, 2,048 elements | 16 x 16 mostly, 204 quads for an item |
+| any other entry | 16 MiB | not read |
+
+An entry is read through a limit, never sized from what its zip header declares (a 408 KB jar that declared 100 bytes and
+inflated to 400 MiB now stops at the limit), and a 42 MB JSON that went to a 1.6 GB peak is refused from its header. The
+sweep peaks at 85 MB over all eight jars.
 
 `check-bridge` loads everything `list` gives through the Provider and validates each `Model`: 1,090 / 2,070 / 2,465 / 2,598 /
 2,573 / 2,784 loaded of as many listed for 1.12.2, 1.19.2, 1.20.1, 1.21.1, 26.2 and 26.3, 0 failures.
@@ -244,7 +301,8 @@ materials; options are the checker's, `--help` lists them; put `--mc-version` be
 **no errors and no warnings** (exit status 0); the same assets in bridge-testbed give a 1.000 x 1.000 x 1.000 m box for
 `block/stone`, identical to the Hytale block it is compared with (AABB `[-0.5, 0, -0.5]` to `[0.5, 1, 0.5]`).
 
-Tests: `cargo test` runs unit tests on tiny synthetic jars built in the tests (no game data anywhere) and real-data tests
+Tests: `cargo test` runs 124 unit tests on tiny synthetic jars built in the tests (no game data anywhere; they include a zip that
+lies about its size and PNGs over the limits) and 23 real-data tests
 in `tests/game_data.rs` that read the installed jars and skip, saying so, where a version is not installed. The real-data
 tests pin, among others: grass tint equals plains `#91bd59` from the jar's own colormap and biome; stairs facing east have
 their tall side to the east in 1.12.2, 1.21.1 and 26.3; `uvlock` keeps planks aligned in all four facings; a wall torch
@@ -286,6 +344,9 @@ content and are not in this repository.
 - **Tint colours** the game computes: redstone dust by power, spruce and birch leaves, anything per biome the data does not
   give, grass colour modifiers (swamp, dark forest), biome blending between neighbouring blocks. `tintindex` is exposed so a
   caller can supply them. Dynamic item tints (dye, potion, firework, map) use the definition's `default`, or nothing.
+- **What it refuses to guess**, each with its reason where it is met: a generated item layer over the size limits, a
+  palette swap whose palettes are ambiguous, an Euler rotation whose order matters, `rescale` past 45 degrees, an item tint
+  whose data is missing. Nothing is defaulted where the data always speaks.
 - **Which variant a weighted list picks** (the game uses the block position): the first is used, the rest are in
   `BlockState`. **The default state of a block** (in code): see Ids above.
 - **Item model state** (`condition`, `select`, `range_dispatch`, `overrides` of 1.8 to 1.21.3): only the default branch;
