@@ -135,11 +135,19 @@ pub struct TexEntry {
     pub force_translucent: bool,
 }
 
+/// Most elements, and most faces in them, one model file may have. Measured over the eight jars:
+/// the most elements in one model is 22 (`comparator_on_subtract`, 26.3) and the most faces 79
+/// (`cauldron_level1`, 1.12.2); these are 4 times that. Checked before anything is built, so a
+/// model written to be huge costs only its (128 KiB at most) text.
+pub const MAX_MODEL_ELEMENTS: usize = 88;
+pub const MAX_MODEL_FACES: usize = 316;
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct RawModel {
     pub parent: Option<String>,
     pub textures: Vec<(String, TexEntry)>,
-    pub elements: Option<Vec<Element>>,
+    /// Shared with every model that inherits them, so a big parent is held once
+    pub elements: Option<Arc<Vec<Element>>>,
     pub ambient_occlusion: Option<bool>,
     pub gui_light: Option<String>,
     /// The `display` section as written (transforms for the GUI, hand, ground ...); not used for
@@ -242,12 +250,21 @@ impl RawModel {
         }
         let elements = match o.get("elements") {
             None => None,
-            Some(Value::Array(list)) => Some(
-                list.iter()
+            Some(Value::Array(list)) => {
+                if list.len() > MAX_MODEL_ELEMENTS {
+                    bail!("{} elements; the limit is {MAX_MODEL_ELEMENTS}", list.len());
+                }
+                let els = list
+                    .iter()
                     .enumerate()
                     .map(|(i, e)| parse_element(e).with_context(|| format!("elements[{i}]")))
-                    .collect::<Result<Vec<_>>>()?,
-            ),
+                    .collect::<Result<Vec<_>>>()?;
+                let faces: usize = els.iter().map(|e| e.faces.len()).sum();
+                if faces > MAX_MODEL_FACES {
+                    bail!("{faces} faces in one model; the limit is {MAX_MODEL_FACES}");
+                }
+                Some(Arc::new(els))
+            }
             Some(_) => bail!("`elements` is not a list"),
         };
         Ok(RawModel {
@@ -428,7 +445,7 @@ pub struct ResolvedModel {
     pub builtin: Option<Builtin>,
     /// Merged: the root's first, children's overriding by name
     pub textures: Vec<(String, TexEntry)>,
-    pub elements: Vec<Element>,
+    pub elements: Arc<Vec<Element>>,
     pub ambient_occlusion: bool,
     pub gui_light: Option<String>,
     pub display: Option<Value>,
@@ -496,7 +513,7 @@ pub fn resolve(
         }
     }
     let mut textures: Vec<(String, TexEntry)> = Vec::new();
-    let mut elements = Vec::new();
+    let mut elements: Arc<Vec<Element>> = Arc::new(Vec::new());
     let mut ambient = true;
     let mut gui_light = None;
     let mut display = None;
@@ -509,7 +526,7 @@ pub fn resolve(
         }
         if let Some(e) = &m.elements {
             if !(e.is_empty() && rules.empty_elements_inherit) {
-                elements = e.clone();
+                elements = Arc::clone(e);
             }
         }
         if let Some(a) = m.ambient_occlusion {

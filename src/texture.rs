@@ -440,10 +440,25 @@ impl Texture {
             .unwrap_or_else(|_| self.sheet.crop(0, 0, self.frame_width, self.frame_height))
     }
 
-    /// Every frame, in sheet order
+    /// The sheet frames the game shows, in sheet order: the distinct ones the animation lists, or
+    /// just frame 0 for a texture it treats as static (no animation, or one frame left of it)
+    pub fn shown_frames(&self) -> Vec<u32> {
+        match &self.animation {
+            Some(a) => {
+                let mut v: Vec<u32> = a.frames.iter().map(|f| f.index).collect();
+                v.sort_unstable();
+                v.dedup();
+                v
+            }
+            None => vec![0],
+        }
+    }
+
+    /// The frames [`Texture::shown_frames`] names, cut out
     pub fn all_frames(&self) -> Vec<Rgba> {
-        (0..self.sheet_frames())
-            .map(|i| self.frame(i).unwrap())
+        self.shown_frames()
+            .into_iter()
+            .filter_map(|i| self.frame(i).ok())
             .collect()
     }
 }

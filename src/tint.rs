@@ -8,7 +8,7 @@
 //! `dry_foliage.png` where the jar has it) and does the lookup the game does for a temperature and
 //! a downfall, and lets the caller say which index gets which colour ([`TintSet`]).
 //!
-//! The lookup (the game's `GrassColor`/`FoliageColor`, identical in 1.7.10 and 26.3): temperature
+//! The lookup (the game's grass and foliage colour lookup, identical in 1.7.10 and 26.3): temperature
 //! and downfall are clamped to 0..1, downfall is multiplied by temperature, and the colour is the
 //! pixel at `x = (1 - temperature) * 255`, `y = (1 - downfall) * 255` (truncated) of the 256 x 256
 //! map. No biome colour is hardcoded here: temperature and downfall come from the caller or, in

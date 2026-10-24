@@ -9,6 +9,7 @@ use mc_unpack::gltf;
 use mc_unpack::install::{find_jars, JarFile, Source};
 use mc_unpack::jar::escape_control as esc;
 use mc_unpack::mesh::{self, MeshOptions, Origin};
+use mc_unpack::text::{inspect_lines, states_lines};
 use mc_unpack::texture::encode_png;
 use mc_unpack::tint::{parse_rgb, ColormapKind, Tint, TintSet};
 use mc_unpack::version::Support;
@@ -198,15 +199,20 @@ fn cmd_versions(cli: &Cli) -> Result<()> {
                 };
                 println!(
                     "{:<8} {:<17} {:<14} {:<7}  {}",
-                    v.id,
+                    esc(&v.id),
                     j.source.name(),
                     sup,
                     from,
                     v.layout.name()
                 );
-                println!("         {}", tilde(&j.path));
+                println!("         {}", esc(&tilde(&j.path)));
             }
-            Err(e) => println!("{:<8} {:<17} unreadable: {e:#}", j.version, j.source.name()),
+            Err(e) => println!(
+                "{:<8} {:<17} unreadable: {}",
+                esc(&j.version),
+                j.source.name(),
+                esc(&format!("{e:#}"))
+            ),
         }
     }
     Ok(())
@@ -263,7 +269,7 @@ fn cmd_list(
             by.entry(lo.to_string()).or_default().push(id);
         }
         for (why, ids) in by {
-            println!("{} ({}): {}", why, ids.len(), ids.join(" "));
+            println!("{} ({}): {}", esc(&why), ids.len(), ids.join(" "));
         }
     } else {
         eprintln!("{shown} listed");
@@ -272,30 +278,8 @@ fn cmd_list(
 }
 
 fn print_states(a: &Assets, name: &str) -> Result<()> {
-    let bs = a.blockstate(name)?;
-    let default = a.default_state(name)?;
-    if !bs.variants.is_empty() {
-        for k in bs.keys() {
-            let mark = if default.as_deref() == Some(k) {
-                "   <- what `block/<name>` with no state builds"
-            } else {
-                ""
-            };
-            println!(
-                "    {}{mark}",
-                if k.is_empty() { "(no properties)" } else { k }
-            );
-        }
-    } else {
-        for (p, vs) in bs.property_values() {
-            println!(
-                "    {p}: {}",
-                vs.into_iter().collect::<Vec<_>>().join(" | ")
-            );
-        }
-        if let Some(d) = default {
-            println!("    with no state, `block/<name>` builds `{d}`");
-        }
+    for l in states_lines(a, name)? {
+        println!("{l}");
     }
     Ok(())
 }
@@ -400,47 +384,15 @@ fn cmd_model(
             (Some(i), None) => format!(", tintindex {i} (not coloured: no colour given)"),
             _ => String::new(),
         };
-        println!("  {} {:?}{tint}", g.texture, g.alpha);
+        println!("  {} {:?}{tint}", esc(&g.texture), g.alpha);
     }
     Ok(())
 }
 
 fn cmd_inspect(a: Assets, id: String) -> Result<()> {
     let b = a.bake_id(&id)?;
-    let r = &b.report;
-    println!("{id}");
-    println!("  quads: {}, parts: {}", b.quad_count(), b.parts.len());
-    match &r.state_used {
-        Some(s) => println!("  state used: {s}"),
-        None => println!("  state used: (none: the file has no properties to choose)"),
-    }
-    if r.candidates > 1 {
-        println!(
-            "  fits {} entries of the blockstate; the first was used",
-            r.candidates
-        );
-    }
-    if !r.ignored_properties.is_empty() {
-        println!("  ignored properties: {}", r.ignored_properties.join(", "));
-    }
-    for t in b.texture_paths() {
-        println!("  texture: {t}");
-    }
-    let tints: Vec<String> = b.tint_indices().iter().map(|i| i.to_string()).collect();
-    if !tints.is_empty() {
-        println!("  tintindex used: {}", tints.join(", "));
-    }
-    for n in &r.notes {
-        println!("  note: {}", esc(n));
-    }
-    for f in &r.failed_parts {
-        println!("  FAILED part: {}", esc(f));
-    }
-    for d in &r.dropped_parts {
-        println!("  left-out part: {}", esc(d));
-    }
-    if let Some(lo) = &r.left_out {
-        println!("  LEFT OUT: {}", esc(&lo.to_string()));
+    for l in inspect_lines(&id, &b) {
+        println!("{l}");
     }
     Ok(())
 }
@@ -464,10 +416,12 @@ fn cmd_texture(a: Assets, path: String, out: PathBuf, frames: bool) -> Result<()
         ),
     }
     if frames {
-        for (i, f) in t.all_frames().iter().enumerate() {
-            std::fs::write(out.join(format!("{base}_{i}.png")), encode_png(f)?)?;
+        // the sheet frames the game shows, named by their place on the sheet
+        let shown = t.shown_frames();
+        for (i, f) in shown.iter().zip(t.all_frames()) {
+            std::fs::write(out.join(format!("{base}_{i}.png")), encode_png(&f)?)?;
         }
-        println!("wrote {} frames to {}", t.sheet_frames(), tilde(&out));
+        println!("wrote {} frames to {}", shown.len(), tilde(&out));
     } else {
         let p = out.join(format!("{base}.png"));
         std::fs::write(&p, encode_png(&t.default_frame())?)?;
@@ -523,19 +477,24 @@ fn cmd_check(cli: &Cli, verbose: bool) -> Result<bool> {
         let a = match Assets::open(&j.path) {
             Ok(a) => a,
             Err(e) => {
-                println!("{} ({}): unreadable: {e:#}", j.version, j.source.name());
+                println!(
+                    "{} ({}): unreadable: {}",
+                    esc(&j.version),
+                    j.source.name(),
+                    esc(&format!("{e:#}"))
+                );
                 continue;
             }
         };
         let v = a.version();
         println!(
             "== Minecraft {} ({}) - {}",
-            v.id,
+            esc(&v.id),
             j.source.name(),
             v.layout.name()
         );
         match check::run(&a) {
-            Err(e) => println!("   {e:#}"),
+            Err(e) => println!("   {}", esc(&format!("{e:#}"))),
             Ok(r) => {
                 if v.support() == Support::TexturesOnly {
                     println!("   textures only: {}", v.support_note());
@@ -568,20 +527,20 @@ fn cmd_check(cli: &Cli, verbose: bool) -> Result<bool> {
                         );
                     }
                     for (why, ids) in &r.blocks_left_out {
-                        println!("   blocks left out ({}): {}", ids.len(), why);
+                        println!("   blocks left out ({}): {}", ids.len(), esc(why));
                         if verbose {
                             println!("      {}", ids.join(" "));
                         }
                     }
                     for (why, ids) in &r.items_left_out {
-                        println!("   items left out ({}): {}", ids.len(), why);
+                        println!("   items left out ({}): {}", ids.len(), esc(why));
                         if verbose {
                             println!("      {}", ids.join(" "));
                         }
                     }
                 }
                 for f in &r.failures {
-                    println!("   FAIL {f}");
+                    println!("   FAIL {}", esc(f));
                 }
                 if !r.left_out_inside_models.is_empty() {
                     println!(
@@ -628,7 +587,11 @@ fn cmd_check_bridge(cli: &Cli) -> Result<bool> {
         let a = match Assets::open(&j.path) {
             Ok(a) => a,
             Err(e) => {
-                println!("{}: unreadable: {e:#}", j.version);
+                println!(
+                    "{}: unreadable: {}",
+                    esc(&j.version),
+                    esc(&format!("{e:#}"))
+                );
                 continue;
             }
         };
@@ -636,7 +599,11 @@ fn cmd_check_bridge(cli: &Cli) -> Result<bool> {
         let mc = match Minecraft::from_assets(a) {
             Ok(m) => m,
             Err(e) => {
-                println!("== Minecraft {id}: no provider: {e:#}");
+                println!(
+                    "== Minecraft {}: no provider: {}",
+                    esc(&id),
+                    esc(&format!("{e:#}"))
+                );
                 continue;
             }
         };
@@ -678,12 +645,13 @@ fn cmd_check_bridge(cli: &Cli) -> Result<bool> {
             }
         }
         println!(
-            "== Minecraft {id}: {} listed, {ok} loaded ({partial} of them with a part left out), {failed} failed ({tris} triangles, {mats} materials, {:.1} s)",
+            "== Minecraft {}: {} listed, {ok} loaded ({partial} of them with a part left out), {failed} failed ({tris} triangles, {mats} materials, {:.1} s)",
+            esc(&id),
             list.len(),
             start.elapsed().as_secs_f64()
         );
         for f in fails.iter().take(40) {
-            println!("   FAIL {f}");
+            println!("   FAIL {}", esc(f));
         }
         all_ok &= failed == 0;
     }

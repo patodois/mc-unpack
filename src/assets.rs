@@ -3,6 +3,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{bail, Context, Result};
@@ -212,7 +213,14 @@ pub const MAX_BAKE_IMAGE_BYTES: usize = 160 * 1024;
 /// Decoded textures kept for reuse, in bytes (RGBA): the cache is emptied when it would pass this
 const MAX_TEXTURE_CACHE_BYTES: usize = 128 * 1024 * 1024;
 
-/// Files (blockstates, models) kept parsed: the caches are emptied when they pass this
+/// Parsed files (blockstates, models, resolved models) kept for reuse: the three caches are emptied
+/// together when their accounted size would pass this many bytes. A file is accounted at ten times
+/// its JSON text (a parsed tree is several times its text), a resolved model at the size of its
+/// own tables (its elements are shared with the file they came from). A whole sweep of the biggest
+/// jar, 26.3, accounts about 31 MiB, so the real jars never empty it.
+pub const MAX_PARSED_CACHE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Files kept parsed, as a backstop to the byte budget
 const MAX_CACHED_FILES: usize = 20_000;
 
 #[derive(Default)]
@@ -230,6 +238,8 @@ pub struct Assets {
     textures: Mutex<TextureCache>,
     colormaps: Mutex<HashMap<ColormapKind, Arc<Colormap>>>,
     permutations: OnceLock<HashMap<String, PermSource>>,
+    /// What the three parsed-file caches are accounted at (see [`MAX_PARSED_CACHE_BYTES`])
+    parsed_bytes: AtomicUsize,
 }
 
 /// A texture the game generates when it builds an atlas (`atlases/*.json`, source type
@@ -275,6 +285,7 @@ impl Assets {
             textures: Mutex::new(TextureCache::default()),
             colormaps: Mutex::new(HashMap::new()),
             permutations: OnceLock::new(),
+            parsed_bytes: AtomicUsize::new(0),
         })
     }
 
@@ -350,6 +361,7 @@ impl Assets {
         }
         let text = self.jar.read_json(&path)?;
         let b = Arc::new(BlockState::parse(&text).with_context(|| path.clone())?);
+        self.charge_parsed(text.len() * 10);
         {
             let mut c = self.blockstates.lock().unwrap();
             if c.len() >= MAX_CACHED_FILES {
@@ -360,6 +372,22 @@ impl Assets {
         Ok(b)
     }
 
+    /// Accounts `bytes` against the parsed-file budget, emptying the caches first if it would pass
+    fn charge_parsed(&self, bytes: usize) {
+        let total = self.parsed_bytes.fetch_add(bytes, Ordering::SeqCst) + bytes;
+        if total > MAX_PARSED_CACHE_BYTES {
+            self.blockstates.lock().unwrap().clear();
+            self.raw_models.lock().unwrap().clear();
+            self.resolved.lock().unwrap().clear();
+            self.parsed_bytes.store(bytes, Ordering::SeqCst);
+        }
+    }
+
+    /// What the parsed-file caches are accounted at now, in bytes
+    pub fn parsed_cache_bytes(&self) -> usize {
+        self.parsed_bytes.load(Ordering::SeqCst)
+    }
+
     /// A model file by its path relative to `models/` (`block/stone`), parsed, not resolved
     pub fn raw_model(&self, id: &str) -> Result<Arc<RawModel>> {
         if let Some(m) = self.raw_models.lock().unwrap().get(id) {
@@ -368,6 +396,7 @@ impl Assets {
         let path = format!("{ROOT}/models/{id}.json");
         let text = self.jar.read_json(&path)?;
         let m = Arc::new(RawModel::parse(&text).with_context(|| path.clone())?);
+        self.charge_parsed(text.len() * 10);
         {
             let mut c = self.raw_models.lock().unwrap();
             if c.len() >= MAX_CACHED_FILES {
@@ -388,6 +417,7 @@ impl Assets {
             empty_elements_inherit: self.layout() != Layout::ModelsWithItemDefs,
         };
         let m = Arc::new(resolve(&id, rules, &mut |p| self.raw_model(p))?);
+        self.charge_parsed(512 + m.textures.len() * 160 + m.chain.len() * 64);
         let mut c = self.resolved.lock().unwrap();
         if c.len() >= MAX_CACHED_FILES {
             c.clear();
@@ -586,6 +616,7 @@ impl Assets {
         self.blockstates.lock().unwrap().clear();
         self.raw_models.lock().unwrap().clear();
         self.resolved.lock().unwrap().clear();
+        self.parsed_bytes.store(0, Ordering::SeqCst);
         let mut c = self.textures.lock().unwrap();
         c.map.clear();
         c.bytes = 0;
@@ -1007,7 +1038,15 @@ impl Assets {
                 if m.elements.is_empty() {
                     return Err(NotData(m.id.clone(), LeftOut::NoElements).into());
                 }
-                bake_model(&m, VariantRotation::default())
+                let (quads, notes) = bake_model(&m, VariantRotation::default())?;
+                if quads.len() > MAX_BAKE_QUADS {
+                    return Err(Refused(format!(
+                        "{} bakes to more than {MAX_BAKE_QUADS} quads",
+                        m.id
+                    ))
+                    .into());
+                }
+                Ok((quads, notes))
             }
         }
     }
@@ -1025,14 +1064,38 @@ impl Assets {
             notes: def.notes.clone(),
             ..Report::default()
         };
+        let item_id = format!("item/{name}");
+        let refuse = |mut report: Report, why: String| BakedModel {
+            id: item_id.clone(),
+            parts: Vec::new(),
+            report: {
+                report.dropped_parts.clear();
+                report.left_out = Some(LeftOut::Refused(why));
+                report
+            },
+        };
+        if def.models.len() > MAX_BAKE_PARTS {
+            let why = format!(
+                "the definition names {} models; the limit is {MAX_BAKE_PARTS}",
+                def.models.len()
+            );
+            return Ok(refuse(report, why));
+        }
         let mut parts = Vec::new();
         let mut first_err = None;
         let mut left_outs: Vec<LeftOut> = Vec::new();
         let mut all_faces_dropped = false;
+        let mut total_quads = 0usize;
         for r in &def.models {
             let id = normalize_location(&r.model)?;
             match self.bake_item_model(&id) {
                 Ok((quads, notes)) => {
+                    total_quads += quads.len();
+                    if total_quads > MAX_BAKE_QUADS {
+                        // stop here: the parts after this one are not baked at all
+                        let why = format!("the item bakes to more than {MAX_BAKE_QUADS} quads");
+                        return Ok(refuse(report, why));
+                    }
                     report.notes.extend(notes);
                     let mut tints = TintSet::new();
                     for (i, t) in r.tints.iter().enumerate() {
@@ -1095,10 +1158,49 @@ impl Assets {
         })
     }
 
+    /// Whether a block, in the state `block/<name>` builds, draws anything. `None`: it does. The
+    /// models are looked at first (cheap); if one draws, the default state is baked, so a block
+    /// that a bake would refuse (over the limits of one bake) or find empty is not called drawable.
+    pub fn classify_block(&self, name: &str) -> Result<Option<LeftOut>> {
+        match self.classify_block_cheap(name)? {
+            Some(lo) => Ok(Some(lo)),
+            None => {
+                let b = self.bake_block(name, &State::default())?;
+                Ok(if b.is_empty() {
+                    Some(b.report.left_out.unwrap_or(LeftOut::NoElements))
+                } else {
+                    None
+                })
+            }
+        }
+    }
+
+    /// The same for an item. A failed part is an error: the Provider would not load it either.
+    pub fn classify_item(&self, name: &str) -> Result<Option<LeftOut>> {
+        match self.classify_item_cheap(name)? {
+            Some(lo) => Ok(Some(lo)),
+            None => {
+                let b = self.bake_item(name)?;
+                if !b.report.failed_parts.is_empty() {
+                    bail!(
+                        "{} part(s) failed: {}",
+                        b.report.failed_parts.len(),
+                        b.report.failed_parts.join("; ")
+                    );
+                }
+                Ok(if b.is_empty() {
+                    b.report.left_out
+                } else {
+                    None
+                })
+            }
+        }
+    }
+
     /// Whether a block draws anything by data, without baking: `None` yes; `Some` why not.
     /// Every model the file mentions is looked at, so a multipart block counts as drawn if any
     /// part is.
-    pub fn classify_block(&self, name: &str) -> Result<Option<LeftOut>> {
+    fn classify_block_cheap(&self, name: &str) -> Result<Option<LeftOut>> {
         self.require_models()?;
         let bs = self.blockstate(name)?;
         let mut first = None;
@@ -1120,7 +1222,7 @@ impl Assets {
             if let Some(s) = self.special_item_kinds(name) {
                 lo = LeftOut::SpecialItem(s);
             } else if self.layout() != Layout::ModelsWithItemDefs {
-                if let Ok(Some(LeftOut::BuiltinEntity)) = self.classify_item(name) {
+                if let Ok(Some(LeftOut::BuiltinEntity)) = self.classify_item_cheap(name) {
                     lo = LeftOut::BuiltinEntity;
                 }
             }
@@ -1129,7 +1231,7 @@ impl Assets {
     }
 
     /// The same for an item, without baking (no texture is decoded). `None`: it draws something.
-    pub fn classify_item(&self, name: &str) -> Result<Option<LeftOut>> {
+    fn classify_item_cheap(&self, name: &str) -> Result<Option<LeftOut>> {
         let def = self.item_default_models(name)?;
         let mut first = None;
         for r in &def.models {
@@ -1897,34 +1999,32 @@ pub mod tests {
 
     #[test]
     fn many_quads_group_by_material_without_scanning_every_group() {
-        // 400 distinct textures on one model: grouping is a map lookup per quad
+        // 100 parts, each its own model and its own texture: grouping is a map lookup per quad
+        let parts: Vec<String> = (0..100)
+            .map(|i| format!(r#"{{"apply":{{"model":"block/m{i}"}}}}"#))
+            .collect();
         let mut b = JarBuilder::new().add(
             "assets/minecraft/blockstates/x.json",
-            r#"{"variants":{"":{"model":"block/m"}}}"#,
-        );
-        let faces: Vec<String> = (0..100).flat_map(|i| (0..4).map(move |_| format!(r##"{{"from":[0,0,0],"to":[16,16,16],"faces":{{"up":{{"texture":"#t{i}"}}}}}}"##))).collect();
-        let slots: Vec<String> = (0..100)
-            .map(|i| format!(r#""t{i}":"block/t{i}""#))
-            .collect();
-        b = b.add(
-            "assets/minecraft/models/block/m.json",
-            format!(
-                r#"{{"textures":{{{}}},"elements":[{}]}}"#,
-                slots.join(","),
-                faces.join(",")
-            ),
+            format!(r#"{{"multipart":[{}]}}"#, parts.join(",")),
         );
         for i in 0..100 {
-            b = b.add(
-                &format!("assets/minecraft/textures/block/t{i}.png"),
-                png(2, 2, |_, _| [i as u8, 0, 0, 255]),
-            );
+            b = b
+                .add(
+                    &format!("assets/minecraft/models/block/m{i}.json"),
+                    format!(
+                        r##"{{"textures":{{"all":"block/t{i}"}},"elements":[{{"from":[0,0,0],"to":[16,16,16],"faces":{{"up":{{"texture":"#all"}},"down":{{"texture":"#all"}}}}}}]}}"##
+                    ),
+                )
+                .add(
+                    &format!("assets/minecraft/textures/block/t{i}.png"),
+                    png(2, 2, |_, _| [i as u8, 0, 0, 255]),
+                );
         }
         let a = Assets::from_jar(b.build()).unwrap();
         let baked = a.bake_block("x", &State::default()).unwrap();
         let g = crate::mesh::build(&a, &baked, &crate::mesh::MeshOptions::default()).unwrap();
         assert_eq!(g.len(), 100);
-        assert!(g.iter().all(|g| g.quads.len() == 4));
+        assert!(g.iter().all(|g| g.quads.len() == 2));
     }
 
     #[test]
@@ -2072,5 +2172,204 @@ pub mod tests {
             assert!(a.textures.lock().unwrap().bytes <= MAX_TEXTURE_CACHE_BYTES);
         }
         assert!(Arc::strong_count(&t) >= 1);
+    }
+
+    // ---- third review ----
+
+    fn composite_of(n: usize, model: &str) -> Vec<(String, Vec<u8>)> {
+        let parts: Vec<String> = (0..n)
+            .map(|_| format!(r#"{{"type":"minecraft:model","model":"minecraft:{model}"}}"#))
+            .collect();
+        vec![(
+            "assets/minecraft/items/c.json".to_string(),
+            format!(
+                r#"{{"model":{{"type":"minecraft:composite","models":[{}]}}}}"#,
+                parts.join(",")
+            )
+            .into_bytes(),
+        )]
+    }
+
+    fn item_jar(extra: Vec<(String, Vec<u8>)>) -> Jar {
+        let mut b = JarBuilder::new()
+            .add("assets/minecraft/blockstates/x.json", r#"{"variants":{"":{"model":"block/m"}}}"#)
+            .add("assets/minecraft/models/item/generated.json", r#"{"parent":"builtin/generated"}"#)
+            .add("assets/minecraft/models/item/ok.json", r#"{"parent":"item/generated","textures":{"layer0":"item/ok"}}"#)
+            .add("assets/minecraft/models/block/m.json",
+                 r##"{"textures":{"all":"block/t"},"elements":[{"from":[0,0,0],"to":[16,16,16],"faces":{"up":{"texture":"#all"}}}]}"##)
+            .add("assets/minecraft/textures/block/t.png", png(2, 2, |_, _| [1, 2, 3, 255]))
+            .add("assets/minecraft/textures/item/ok.png", png(16, 16, |_, _| [1, 2, 3, 255]));
+        for (n, d) in extra {
+            b = b.add(&n, d);
+        }
+        b.build()
+    }
+
+    #[test]
+    fn an_item_that_names_too_many_models_is_refused_before_any_is_baked() {
+        let a = Assets::from_jar(item_jar(composite_of(MAX_BAKE_PARTS + 1, "item/ok"))).unwrap();
+        let b = a.bake_item("c").unwrap();
+        assert!(b.is_empty());
+        assert!(
+            matches!(&b.report.left_out, Some(LeftOut::Refused(w)) if w.contains("names")),
+            "{:?}",
+            b.report.left_out
+        );
+        // exactly at the limit is not a part-count refusal (it may still be one for quads)
+        let a = Assets::from_jar(item_jar(composite_of(MAX_BAKE_PARTS, "block/m"))).unwrap();
+        assert_eq!(a.bake_item("c").unwrap().parts.len(), MAX_BAKE_PARTS);
+    }
+
+    #[test]
+    fn an_item_whose_parts_add_up_past_the_quad_limit_is_refused_and_stops_baking() {
+        // each `item/ok` is 2 + 64 quads: 20 of them are 1,320, over 1,040
+        let a = Assets::from_jar(item_jar(composite_of(20, "item/ok"))).unwrap();
+        let b = a.bake_item("c").unwrap();
+        assert!(b.is_empty(), "{} quads", b.quad_count());
+        assert!(
+            matches!(&b.report.left_out, Some(LeftOut::Refused(w)) if w.contains("quads")),
+            "{:?}",
+            b.report.left_out
+        );
+        // 15 are 990: fine
+        let a = Assets::from_jar(item_jar(composite_of(15, "item/ok"))).unwrap();
+        assert_eq!(a.bake_item("c").unwrap().quad_count(), 15 * 66);
+        // the sweep calls the refused one left out, not failed, and does not list it
+        let a = Assets::from_jar(item_jar(composite_of(20, "item/ok"))).unwrap();
+        let r = crate::check::run(&a).unwrap();
+        assert_eq!(r.total_failed(), 0, "{:?}", r.failures);
+        assert!(
+            r.items_left_out.keys().any(|k| k.starts_with("refused")),
+            "{:?}",
+            r.items_left_out
+        );
+        assert!(matches!(
+            a.classify_item("c").unwrap(),
+            Some(LeftOut::Refused(_))
+        ));
+    }
+
+    #[test]
+    fn a_blockstate_that_names_one_model_thousands_of_times_is_swept_once() {
+        let mp: Vec<String> = (0..3000)
+            .map(|_| r#"{"apply":{"model":"block/m"}}"#.to_string())
+            .collect();
+        let jar = JarBuilder::new()
+            .add("assets/minecraft/blockstates/x.json", format!(r#"{{"multipart":[{}]}}"#, mp.join(",")))
+            .add("assets/minecraft/models/block/m.json",
+                 r##"{"textures":{"all":"block/t"},"elements":[{"from":[0,0,0],"to":[16,16,16],"faces":{"up":{"texture":"#all"}}}]}"##)
+            .add("assets/minecraft/textures/block/t.png", png(2, 2, |_, _| [1, 2, 3, 255]))
+            .build();
+        let a = Assets::from_jar(jar).unwrap();
+        let r = crate::check::run(&a).unwrap();
+        assert_eq!(r.total_failed(), 0, "{:?}", r.failures);
+        assert_eq!(r.quads, 1, "one model, one bake");
+        // and the listing does not offer it: a bake of that state is refused
+        assert!(matches!(
+            a.classify_block("x").unwrap(),
+            Some(LeftOut::Refused(_))
+        ));
+    }
+
+    #[test]
+    fn the_parsed_caches_are_bounded_by_bytes() {
+        // 400 models of about 40 KB of text each: accounted at ten times that, far over the budget
+        let pad = "x".repeat(40_000);
+        let mut b = JarBuilder::new().add(
+            "assets/minecraft/textures/block/t.png",
+            png(2, 2, |_, _| [1, 2, 3, 255]),
+        );
+        for i in 0..400 {
+            b = b
+                .add(&format!("assets/minecraft/blockstates/b{i}.json"), format!(r#"{{"variants":{{"":{{"model":"block/m{i}"}}}}}}"#))
+                .add(&format!("assets/minecraft/models/block/m{i}.json"),
+                     format!(r##"{{"__pad":"{pad}","textures":{{"all":"block/t"}},"elements":[{{"from":[0,0,0],"to":[16,16,16],"faces":{{"up":{{"texture":"#all"}}}}}}]}}"##));
+        }
+        let a = Assets::from_jar(b.build()).unwrap();
+        let mut peak = 0;
+        for i in 0..400 {
+            a.bake_block(&format!("b{i}"), &State::default()).unwrap();
+            peak = peak.max(a.parsed_cache_bytes());
+            assert!(
+                a.parsed_cache_bytes() <= MAX_PARSED_CACHE_BYTES,
+                "after {i}: {}",
+                a.parsed_cache_bytes()
+            );
+        }
+        // 400 x 400 KB would be 160 MB if nothing were dropped
+        assert!(
+            peak > 10 * 1024 * 1024 && peak <= MAX_PARSED_CACHE_BYTES,
+            "{peak}"
+        );
+        // what was dropped is read again when asked for
+        assert!(a.bake_block("b0", &State::default()).is_ok());
+    }
+
+    #[test]
+    fn a_child_model_shares_its_parents_elements() {
+        let a = tiny();
+        let cube = a.model("block/cube").unwrap();
+        let all = a.model("block/cube_all").unwrap();
+        assert!(
+            Arc::ptr_eq(&cube.elements, &all.elements),
+            "inherited elements are one allocation"
+        );
+    }
+
+    #[test]
+    fn a_model_over_the_element_limit_is_not_parsed() {
+        let el = r##"{"from":[0,0,0],"to":[16,16,16],"faces":{"up":{"texture":"#all"}}}"##;
+        let ok = format!(
+            r#"{{"elements":[{}]}}"#,
+            vec![el; crate::model::MAX_MODEL_ELEMENTS].join(",")
+        );
+        assert!(RawModel::parse(&ok).is_ok());
+        let big = format!(
+            r#"{{"elements":[{}]}}"#,
+            vec![el; crate::model::MAX_MODEL_ELEMENTS + 1].join(",")
+        );
+        let e = RawModel::parse(&big).unwrap_err();
+        assert!(e.to_string().contains("limit"), "{e:#}");
+        // faces too: 60 elements of 6 faces
+        let six = r##"{"from":[0,0,0],"to":[16,16,16],"faces":{"up":{"texture":"#a"},"down":{"texture":"#a"},"north":{"texture":"#a"},"south":{"texture":"#a"},"east":{"texture":"#a"},"west":{"texture":"#a"}}}"##;
+        let faces = format!(r#"{{"elements":[{}]}}"#, vec![six; 60].join(","));
+        assert!(RawModel::parse(&faces)
+            .unwrap_err()
+            .to_string()
+            .contains("faces"));
+    }
+
+    #[test]
+    fn a_static_sprite_shows_frame_0_and_an_animated_one_only_its_listed_frames() {
+        use crate::texture::McMeta;
+        // 3 frames of 2 x 2: red, green, blue (a 2 x 6 sheet)
+        let sheet = || {
+            decode_png(&png(2, 6, |_, y| match y / 2 {
+                0 => [255, 0, 0, 255],
+                1 => [0, 255, 0, 255],
+                _ => [0, 0, 255, 255],
+            }))
+            .unwrap()
+        };
+        let listed = Texture::new(
+            sheet(),
+            Some(&McMeta::parse(r#"{"animation":{"frames":[2,1,2]}}"#).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(listed.shown_frames(), vec![1, 2]);
+        let frames = listed.all_frames();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].pixel(0, 0), [0, 255, 0, 255]);
+        // one valid frame left: the game does not animate, and shows frame 0
+        let degraded = Texture::new(
+            sheet(),
+            Some(&McMeta::parse(r#"{"animation":{"frames":[2,9]}}"#).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(degraded.shown_frames(), vec![0]);
+        assert_eq!(degraded.all_frames().len(), 1);
+        let plain =
+            Texture::new(decode_png(&png(2, 2, |_, _| [1, 1, 1, 255])).unwrap(), None).unwrap();
+        assert_eq!(plain.shown_frames(), vec![0]);
     }
 }

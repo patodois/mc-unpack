@@ -33,6 +33,7 @@ pub mod item;
 pub mod jar;
 pub mod mesh;
 pub mod model;
+pub mod text;
 pub mod texture;
 pub mod tint;
 pub mod version;

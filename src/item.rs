@@ -40,8 +40,9 @@ pub const LAYER_SEPARATION: f64 = 0.005;
 pub fn opacity_union(t: &Texture) -> (u32, u32, Vec<bool>) {
     let (w, h) = (t.frame_width, t.frame_height);
     let mut opaque = vec![false; (w * h) as usize];
-    for i in 0..t.sheet_frames() {
-        let f = t.frame(i).expect("frame in range");
+    // only the frames the game shows: those the animation lists, or frame 0 of a static sprite
+    for i in t.shown_frames() {
+        let Ok(f) = t.frame(i) else { continue };
         for y in 0..h {
             for x in 0..w {
                 if f.alpha(x, y) != 0 {
@@ -679,5 +680,32 @@ mod tests {
         assert_eq!(r.notes.len(), 4, "{:?}", r.notes);
         assert!(r.notes[0].contains("temperature") && r.notes[0].contains("downfall"));
         assert!(r.notes[2].contains("value"));
+    }
+
+    #[test]
+    fn opacity_comes_only_from_the_frames_the_game_shows() {
+        // 2 x 6 sheet of three 2 x 2 frames; pixel (0,0) opaque in frame 0, (1,1) in frame 1, (0,1) in frame 2
+        let img = decode_png(&png(2, 6, |x, y| match (x, y) {
+            (0, 0) => [1, 1, 1, 255],
+            (1, 3) => [1, 1, 1, 255],
+            (0, 5) => [1, 1, 1, 255],
+            _ => [0, 0, 0, 0],
+        }))
+        .unwrap();
+        let with = |meta: &str| {
+            let m = crate::texture::McMeta::parse(meta).unwrap();
+            let t = Texture::new(img.clone(), Some(&m)).unwrap();
+            opacity_union(&t).2
+        };
+        // frames 1 and 2 listed: frame 0's pixel does not count
+        assert_eq!(
+            with(r#"{"animation":{"frames":[1,2]}}"#),
+            vec![false, false, true, true]
+        );
+        // frame 0 only (one valid frame left, so the sprite is static): just its pixel
+        assert_eq!(
+            with(r#"{"animation":{"frames":[2,9]}}"#),
+            vec![true, false, false, false]
+        );
     }
 }

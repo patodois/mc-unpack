@@ -408,7 +408,14 @@ fn bake_all_variants(
 ) -> Result<Option<LeftOut>> {
     let mut drawn = false;
     let mut first_left_out = None;
+    // The same model with the same turn is baked once: a hostile blockstate can name one model
+    // thousands of times. Past the limits of one bake the block is left out, not baked further.
+    let mut seen: std::collections::HashSet<(String, i32, i32, i32, bool)> = Default::default();
+    let mut total = 0usize;
     for v in bs.all_variants() {
+        if !seen.insert((v.model.clone(), v.x, v.y, v.z, v.uvlock)) {
+            continue;
+        }
         let id = a.variant_model_id(&v.model)?;
         let m = a.model(&id)?;
         if let Some(lo) = a.left_out_of(&m) {
@@ -417,6 +424,20 @@ fn bake_all_variants(
         }
         let (q, face_notes) = bake_model(&m, a.variant_rotation_of(v))?;
         inside.extend(face_notes);
+        // one bake of a `variants` file holds one variant; of a multipart file, every part at once
+        let (held, parts) = if bs.is_multipart() {
+            total += q.len();
+            (total, seen.len())
+        } else {
+            (q.len(), 1)
+        };
+        if parts > crate::assets::MAX_BAKE_PARTS || held > crate::assets::MAX_BAKE_QUADS {
+            return Ok(Some(LeftOut::Refused(format!(
+                "its models bake to more than {} quads or {} parts",
+                crate::assets::MAX_BAKE_QUADS,
+                crate::assets::MAX_BAKE_PARTS
+            ))));
+        }
         *quads += q.len() as u64;
         let mut tex: Vec<String> = Vec::new();
         for quad in &q {

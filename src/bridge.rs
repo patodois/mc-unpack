@@ -560,4 +560,50 @@ mod tests {
             "block/s?variant=a=2,b=1"
         );
     }
+
+    #[test]
+    fn the_listing_does_not_offer_what_a_load_would_refuse() {
+        use crate::jar::testjar::{png, JarBuilder};
+        let parts = |n: usize| -> String {
+            (0..n)
+                .map(|_| r#"{"type":"minecraft:model","model":"minecraft:item/ok"}"#.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let jar = JarBuilder::new()
+            .add(
+                "assets/minecraft/blockstates/x.json",
+                r#"{"variants":{"":{"model":"block/nothing"}}}"#,
+            )
+            .add(
+                "assets/minecraft/models/item/generated.json",
+                r#"{"parent":"builtin/generated"}"#,
+            )
+            .add(
+                "assets/minecraft/models/item/ok.json",
+                r#"{"parent":"item/generated","textures":{"layer0":"item/ok"}}"#,
+            )
+            .add(
+                "assets/minecraft/textures/item/ok.png",
+                png(16, 16, |_, _| [1, 2, 3, 255]),
+            )
+            .add(
+                "assets/minecraft/items/ok.json",
+                r#"{"model":{"type":"minecraft:model","model":"minecraft:item/ok"}}"#,
+            )
+            .add(
+                "assets/minecraft/items/big.json",
+                format!(
+                    r#"{{"model":{{"type":"minecraft:composite","models":[{}]}}}}"#,
+                    parts(20)
+                ),
+            )
+            .build();
+        let m = Minecraft::from_assets(Assets::from_jar(jar).unwrap()).unwrap();
+        let ids: Vec<String> = m.list("").unwrap().into_iter().map(|a| a.id).collect();
+        assert!(ids.contains(&"item/ok".to_string()));
+        assert!(!ids.contains(&"item/big".to_string()), "{ids:?}");
+        let e = m.load("item/big").unwrap_err();
+        assert!(e.downcast_ref::<LeftOutError>().is_some(), "{e}");
+    }
 }
