@@ -16,9 +16,21 @@
 
 use serde_json::Value;
 
+use anyhow::Result;
+
+use crate::assets::Refused;
 use crate::model::{Dir, Element, Face};
 use crate::texture::Texture;
 use crate::tint::{color_from_json, ColormapKind, Tint};
+
+/// Largest generated layer texture, per side. Item textures are 16 x 16 (some 32); a 512 x 512 one
+/// would be hundreds of thousands of strips.
+pub const MAX_LAYER_SIDE: u32 = 128;
+
+/// Most elements one generated layer may have (front, back and strips). The most any item in the
+/// eight jars needs is far below this (see `mc-unpack check`); a texture whose alpha is a
+/// checkerboard has one strip per pixel edge and goes over it.
+pub const MAX_LAYER_ELEMENTS: usize = 2048;
 
 /// Added to each side of a layer's slab per layer index, in model units (1/16 block)
 pub const LAYER_SEPARATION: f64 = 0.005;
@@ -52,7 +64,25 @@ fn face(dir_uv: [f64; 4], texture: &str, tint: u32) -> Face {
 }
 
 /// The elements of one generated layer. `texture` is the reference its faces carry (`#layer0`).
-pub fn layer_elements(layer: u32, texture: &str, w: u32, h: u32, opaque: &[bool]) -> Vec<Element> {
+/// A layer over [`MAX_LAYER_SIDE`] or [`MAX_LAYER_ELEMENTS`] is refused (left out, with the reason).
+pub fn layer_elements(
+    layer: u32,
+    texture: &str,
+    w: u32,
+    h: u32,
+    opaque: &[bool],
+) -> Result<Vec<Element>> {
+    if w > MAX_LAYER_SIDE || h > MAX_LAYER_SIDE || opaque.len() != (w as usize) * (h as usize) {
+        return Err(Refused(format!(
+            "generated item layer {layer} is {w} x {h}; the limit is {MAX_LAYER_SIDE} x {MAX_LAYER_SIDE}"
+        ))
+        .into());
+    }
+    let too_many = || {
+        Refused(format!(
+            "generated item layer {layer} needs more than {MAX_LAYER_ELEMENTS} elements (one strip per edge of its alpha)"
+        ))
+    };
     let z0 = 7.5 - LAYER_SEPARATION * layer as f64;
     let z1 = 8.5 + LAYER_SEPARATION * layer as f64;
     let fx = 16.0 / w as f64;
@@ -72,7 +102,9 @@ pub fn layer_elements(layer: u32, texture: &str, w: u32, h: u32, opaque: &[bool]
         shade: true,
         light_emission: 0,
         faces: vec![
-            (Dir::North, face([0.0, 0.0, 16.0, 16.0], texture, layer)),
+            // north faces are drawn mirrored in u relative to the south face, so that the same
+            // texel sits behind the same texel at the same x (and meets the edge strips there)
+            (Dir::North, face([16.0, 0.0, 0.0, 16.0], texture, layer)),
             (Dir::South, face([0.0, 0.0, 16.0, 16.0], texture, layer)),
         ],
     });
@@ -91,6 +123,9 @@ pub fn layer_elements(layer: u32, texture: &str, w: u32, h: u32, opaque: &[bool]
                     } else {
                         16.0 - (y + 1) as f64 * fy
                     };
+                    if out.len() >= MAX_LAYER_ELEMENTS {
+                        return Err(too_many().into());
+                    }
                     out.push(Element {
                         from: [x0 as f64 * fx, edge, z0],
                         to: [x as f64 * fx, edge, z1],
@@ -132,6 +167,9 @@ pub fn layer_elements(layer: u32, texture: &str, w: u32, h: u32, opaque: &[bool]
                     } else {
                         (x + 1) as f64 * fx
                     };
+                    if out.len() >= MAX_LAYER_ELEMENTS {
+                        return Err(too_many().into());
+                    }
                     out.push(Element {
                         from: [edge, 16.0 - y as f64 * fy, z0],
                         to: [edge, 16.0 - y0 as f64 * fy, z1],
@@ -158,7 +196,7 @@ pub fn layer_elements(layer: u32, texture: &str, w: u32, h: u32, opaque: &[bool]
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// A tint an item definition carries
@@ -217,34 +255,56 @@ fn short(t: &str) -> &str {
     t.strip_prefix("minecraft:").unwrap_or(t)
 }
 
-fn parse_tints(v: Option<&Value>) -> Vec<ItemTint> {
+/// Reads a definition's `tints`. Nothing is assumed: a tint whose data is missing or unreadable
+/// becomes [`ItemTint::Dynamic`] with no default, and a line in `notes` says so.
+fn parse_tints(v: Option<&Value>, model: &str, notes: &mut Vec<String>) -> Vec<ItemTint> {
     let Some(list) = v.and_then(|t| t.as_array()) else {
         return Vec::new();
     };
     list.iter()
-        .map(|t| {
+        .enumerate()
+        .map(|(i, t)| {
             let ty = t
                 .get("type")
                 .and_then(|s| s.as_str())
                 .map(short)
                 .unwrap_or("");
+            let mut skip = |why: &str| {
+                notes.push(format!(
+                    "{model}: tint {i} ({ty}) {why}: left uncoloured"
+                ));
+                ItemTint::Dynamic {
+                    kind: format!("{ty} ({why})"),
+                    default: None,
+                }
+            };
             match ty {
-                "constant" => t
-                    .get("value")
-                    .and_then(color_from_json)
-                    .map(ItemTint::Constant)
-                    .unwrap_or(ItemTint::Dynamic {
-                        kind: "constant (unreadable)".into(),
-                        default: None,
-                    }),
-                "grass" => ItemTint::Grass {
-                    temperature: t.get("temperature").and_then(|n| n.as_f64()).unwrap_or(0.5),
-                    downfall: t.get("downfall").and_then(|n| n.as_f64()).unwrap_or(1.0),
+                "constant" => match t.get("value").and_then(color_from_json) {
+                    Some(c) => ItemTint::Constant(c),
+                    None => skip("has no readable `value`"),
                 },
-                other => ItemTint::Dynamic {
-                    kind: other.to_string(),
-                    default: t.get("default").and_then(color_from_json),
+                "grass" => match (
+                    t.get("temperature").and_then(|n| n.as_f64()),
+                    t.get("downfall").and_then(|n| n.as_f64()),
+                ) {
+                    (Some(temperature), Some(downfall)) => ItemTint::Grass {
+                        temperature,
+                        downfall,
+                    },
+                    _ => skip("needs `temperature` and `downfall`, and the data lacks one"),
                 },
+                other => {
+                    let default = t.get("default").and_then(color_from_json);
+                    if default.is_none() {
+                        notes.push(format!(
+                            "{model}: tint {i} ({other}) is computed by the game from the stack and has no `default`: left uncoloured"
+                        ));
+                    }
+                    ItemTint::Dynamic {
+                        kind: other.to_string(),
+                        default,
+                    }
+                }
             }
         })
         .collect()
@@ -273,10 +333,13 @@ fn walk(node: &Value, out: &mut DefaultModels) {
         .unwrap_or("");
     match ty {
         "model" => match node.get("model").and_then(|m| m.as_str()) {
-            Some(m) => out.models.push(ItemModelRef {
-                model: m.to_string(),
-                tints: parse_tints(node.get("tints")),
-            }),
+            Some(m) => {
+                let tints = parse_tints(node.get("tints"), short(m), &mut out.notes);
+                out.models.push(ItemModelRef {
+                    model: m.to_string(),
+                    tints,
+                })
+            }
             None => out.notes.push("a `model` node without a model".into()),
         },
         "composite" => {
@@ -320,14 +383,28 @@ fn walk(node: &Value, out: &mut DefaultModels) {
             .and_then(|c| c.get("model"));
             match node.get("fallback").or(first) {
                 Some(b) => {
-                    out.notes.push(format!(
+                    let fallback = node.get("fallback").is_some();
+                    let mut note = format!(
                         "{ty} on {prop}: took the {}",
-                        if node.get("fallback").is_some() {
-                            "fallback"
-                        } else {
-                            "first case"
-                        }
-                    ));
+                        if fallback { "fallback" } else { "first case" }
+                    );
+                    if fallback && prop == "display_context" {
+                        // the cases name where the item is drawn as a sprite (gui, ground ...); the
+                        // fallback is the model for the contexts they do not name (in the hand)
+                        let named: Vec<String> = node
+                            .get("cases")
+                            .and_then(|c| c.as_array())
+                            .into_iter()
+                            .flatten()
+                            .filter_map(|c| c.get("when"))
+                            .map(|w| w.to_string())
+                            .collect();
+                        note.push_str(&format!(
+                            " (the model for the display contexts the cases do not name; they name {})",
+                            named.join(", ")
+                        ));
+                    }
+                    out.notes.push(note);
                     walk(b, out)
                 }
                 None => out
@@ -366,6 +443,10 @@ mod tests {
         v
     }
 
+    fn le(layer: u32, texture: &str, w: u32, h: u32, opaque: &[bool]) -> Vec<Element> {
+        layer_elements(layer, texture, w, h, opaque).unwrap()
+    }
+
     fn quads(els: &[Element]) -> Vec<crate::bake::Quad> {
         let mut out = Vec::new();
         for e in els {
@@ -374,6 +455,7 @@ mod tests {
                 VariantRotation::default(),
                 &mut |_| Ok(("item/t".into(), false)),
                 &mut out,
+                &mut Vec::new(),
             )
             .unwrap();
         }
@@ -383,7 +465,7 @@ mod tests {
     #[test]
     fn a_full_square_has_front_back_and_four_edges() {
         let o = opaque_from(16, 16, |_, _| true);
-        let els = layer_elements(0, "#layer0", 16, 16, &o);
+        let els = le(0, "#layer0", 16, 16, &o);
         // front slab + one merged run per side
         assert_eq!(els.len(), 1 + 4);
         let q = quads(&els);
@@ -408,7 +490,7 @@ mod tests {
     #[test]
     fn one_opaque_pixel_has_four_one_pixel_edges() {
         let o = opaque_from(16, 16, |x, y| x == 5 && y == 3);
-        let els = layer_elements(0, "#layer0", 16, 16, &o);
+        let els = le(0, "#layer0", 16, 16, &o);
         let sides: Vec<_> = els.iter().skip(1).collect();
         assert_eq!(sides.len(), 4);
         // the UV of each strip is that pixel
@@ -433,7 +515,7 @@ mod tests {
     fn interior_pixels_have_no_edges_and_runs_merge() {
         // a 3 x 3 block of pixels inside the texture
         let o = opaque_from(16, 16, |x, y| (4..7).contains(&x) && (4..7).contains(&y));
-        let els = layer_elements(0, "#layer0", 16, 16, &o);
+        let els = le(0, "#layer0", 16, 16, &o);
         assert_eq!(els.len(), 1 + 4, "one merged run per side");
         let up = els
             .iter()
@@ -450,7 +532,7 @@ mod tests {
         let o = opaque_from(16, 16, |x, y| {
             (4..9).contains(&x) && (4..9).contains(&y) && !(x == 6 && y == 6)
         });
-        let els = layer_elements(0, "#layer0", 16, 16, &o);
+        let els = le(0, "#layer0", 16, 16, &o);
         let dirs: Vec<Dir> = els.iter().skip(1).map(|e| e.faces[0].0).collect();
         // 4 outer runs + 4 hole edges
         assert_eq!(dirs.len(), 8);
@@ -459,15 +541,15 @@ mod tests {
     #[test]
     fn empty_texture_has_only_front_and_back() {
         let o = opaque_from(16, 16, |_, _| false);
-        let els = layer_elements(0, "#layer0", 16, 16, &o);
+        let els = le(0, "#layer0", 16, 16, &o);
         assert_eq!(els.len(), 1);
     }
 
     #[test]
     fn layers_carry_their_tint_index_and_are_separated() {
         let o = opaque_from(16, 16, |_, _| true);
-        let l0 = layer_elements(0, "#layer0", 16, 16, &o);
-        let l2 = layer_elements(2, "#layer2", 16, 16, &o);
+        let l0 = le(0, "#layer0", 16, 16, &o);
+        let l2 = le(2, "#layer2", 16, 16, &o);
         assert_eq!(l2[0].faces[0].1.tintindex, Some(2));
         assert!(l2[0].from[2] < l0[0].from[2] && l2[0].to[2] > l0[0].to[2]);
     }
@@ -475,7 +557,7 @@ mod tests {
     #[test]
     fn a_texture_that_is_not_16_wide_scales_the_strips() {
         let o = opaque_from(32, 32, |x, y| x == 0 && y == 0);
-        let els = layer_elements(0, "#layer0", 32, 32, &o);
+        let els = le(0, "#layer0", 32, 32, &o);
         let west = els
             .iter()
             .skip(1)
@@ -526,7 +608,32 @@ mod tests {
             Some(Tint::Rgb([0xA0, 0x65, 0x40]))
         );
         assert_eq!(r.models[0].tints[2].to_tint(), None);
-        assert_eq!(r.notes.len(), 2);
+        assert_eq!(r.notes.len(), 3);
+        assert!(
+            r.notes
+                .iter()
+                .any(|n| n.contains("potion") && n.contains("no `default`")),
+            "{:?}",
+            r.notes
+        );
+    }
+
+    #[test]
+    fn a_display_context_select_takes_the_fallback_and_says_what_that_means() {
+        let d: Value = serde_json::from_str(
+            r#"{"model":{"type":"minecraft:select","property":"minecraft:display_context",
+                "cases":[{"when":["gui","ground"],"model":{"type":"minecraft:model","model":"minecraft:item/sprite"}}],
+                "fallback":{"type":"minecraft:model","model":"minecraft:item/in_hand"}}}"#,
+        )
+        .unwrap();
+        let r = default_models(&d);
+        assert_eq!(r.models[0].model, "minecraft:item/in_hand");
+        assert!(
+            r.notes[0].contains("display contexts the cases do not name"),
+            "{:?}",
+            r.notes
+        );
+        assert!(r.notes[0].contains("gui"), "{:?}", r.notes);
     }
 
     #[test]
@@ -544,5 +651,73 @@ mod tests {
                 downfall: 1.0
             })
         );
+    }
+
+    #[test]
+    fn front_and_back_faces_sample_the_same_texel_at_the_same_x() {
+        // a texture that is opaque everywhere: the south (front) and north (back) quads and the
+        // edge strips must agree on which u belongs to which x
+        let o = opaque_from(16, 16, |_, _| true);
+        let q = quads(&le(0, "#layer0", 16, 16, &o));
+        let u_at = |face: Dir, x: f32| -> Vec<f32> {
+            let mut v = Vec::new();
+            for quad in q.iter().filter(|q| q.face == face) {
+                for i in 0..4 {
+                    if (quad.pos[i][0] - x).abs() < 1e-6 && (quad.pos[i][1] - 1.0).abs() < 1e-6 {
+                        v.push(quad.uv[i][0]);
+                    }
+                }
+            }
+            v
+        };
+        for x in [0.0f32, 1.0] {
+            let s = u_at(Dir::South, x);
+            let n = u_at(Dir::North, x);
+            assert!(!s.is_empty() && !n.is_empty());
+            assert!((s[0] - x).abs() < 1e-6, "south u at x={x}: {s:?}");
+            assert!(
+                (n[0] - x).abs() < 1e-6,
+                "north u at x={x}: {n:?} (was mirrored)"
+            );
+        }
+    }
+
+    #[test]
+    fn oversized_layers_are_refused() {
+        let big = opaque_from(129, 4, |_, _| true);
+        assert!(layer_elements(0, "#layer0", 129, 4, &big).is_err());
+        let checker = opaque_from(64, 64, |x, y| (x + y) % 2 == 0);
+        let e = layer_elements(0, "#layer0", 64, 64, &checker).unwrap_err();
+        assert!(
+            e.downcast_ref::<crate::assets::Refused>().is_some(),
+            "{e:#}"
+        );
+        assert!(layer_elements(
+            0,
+            "#layer0",
+            16,
+            16,
+            &opaque_from(16, 16, |x, y| (x + y) % 2 == 0)
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn tints_with_missing_data_are_noted_not_defaulted() {
+        let d: Value = serde_json::from_str(
+            r#"{"model":{"type":"minecraft:model","model":"minecraft:item/a","tints":[
+                {"type":"minecraft:grass"},
+                {"type":"minecraft:grass","temperature":0.2},
+                {"type":"minecraft:constant"},
+                {"type":"minecraft:dye"}]}}"#,
+        )
+        .unwrap();
+        let r = default_models(&d);
+        let t = &r.models[0].tints;
+        assert_eq!(t.len(), 4);
+        assert!(t.iter().all(|t| t.to_tint().is_none()), "{t:?}");
+        assert_eq!(r.notes.len(), 4, "{:?}", r.notes);
+        assert!(r.notes[0].contains("temperature") && r.notes[0].contains("downfall"));
+        assert!(r.notes[2].contains("value"));
     }
 }

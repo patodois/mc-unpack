@@ -21,8 +21,9 @@ pub enum Origin {
 
 #[derive(Clone, Debug)]
 pub struct MeshOptions {
-    /// Which frame of an animated texture to use (modulo the number of frames; 0 by default)
-    pub frame: u32,
+    /// Which frame of an animated texture to use (modulo the number of frames sheet); `None`: the
+    /// first frame the texture's animation shows (see [`crate::texture::Texture::default_frame`])
+    pub frame: Option<u32>,
     /// Tint colours by index; they replace any tint the data attached to the model
     pub tints: TintSet,
     pub origin: Origin,
@@ -31,7 +32,7 @@ pub struct MeshOptions {
 impl Default for MeshOptions {
     fn default() -> Self {
         MeshOptions {
-            frame: 0,
+            frame: None,
             tints: TintSet::new(),
             origin: Origin::BottomCentre,
         }
@@ -90,8 +91,10 @@ pub fn build(assets: &Assets, model: &BakedModel, opts: &MeshOptions) -> Result<
                     let tex = assets
                         .texture(&q.texture)
                         .with_context(|| format!("{}: texture of a face", model.id))?;
-                    let frame = opts.frame % tex.sheet_frames();
-                    let img = tex.frame(frame)?;
+                    let img = match opts.frame {
+                        Some(f) => tex.frame(f % tex.sheet_frames())?,
+                        None => tex.default_frame(),
+                    };
                     let alpha = img.alpha_class(q.translucent);
                     let image = match tint {
                         Some(c) => img.tinted(c),

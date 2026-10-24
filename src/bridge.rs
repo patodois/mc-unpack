@@ -26,7 +26,7 @@
 //!
 //! # Materials
 //!
-//! One material per texture and tint: the texture's frame 0 (or the frame configured), matte.
+//! One material per texture and tint: the texture's first frame (or the frame configured), matte.
 //! Filtering is nearest in the glTF files this crate writes; the bridge's `Material` has no sampler
 //! field, so a renderer has to choose nearest itself. Alpha: `Opaque` when every texel is opaque,
 //! `Mask(0.5)` when texels are opaque or fully transparent, `Blend` otherwise or when the data says
@@ -85,7 +85,7 @@ impl std::error::Error for LeftOutError {}
 pub struct Minecraft {
     assets: Assets,
     tints: TintSet,
-    frame: u32,
+    frame: Option<u32>,
     listing: OnceLock<Vec<AssetInfo>>,
 }
 
@@ -105,7 +105,7 @@ impl Minecraft {
         Ok(Minecraft {
             assets,
             tints: TintSet::new(),
-            frame: 0,
+            frame: None,
             listing: OnceLock::new(),
         })
     }
@@ -136,9 +136,10 @@ impl Minecraft {
         self
     }
 
-    /// Which frame of an animated texture the materials show (0 by default)
+    /// Which sheet frame of an animated texture the materials show (the first frame its animation
+    /// shows by default)
     pub fn with_frame(mut self, frame: u32) -> Self {
-        self.frame = frame;
+        self.frame = Some(frame);
         self
     }
 
@@ -170,9 +171,15 @@ impl Minecraft {
             .into());
         }
         let groups = mesh::build(&self.assets, &baked, &self.mesh_options())?;
+        // rewrite-bridge 0.2 has no channel for notes, so the name carries what a caller most needs:
+        // the id that reproduces this exact model, with the state that was chosen for it
+        let name = match (&baked.report.state_used, id.contains('?')) {
+            (Some(s), false) => format!("{id}?variant={s}"),
+            _ => id.to_string(),
+        };
         let mut model = Model {
-            name: id.to_string(),
-            nodes: vec![Node::new(id, None)],
+            name: name.clone(),
+            nodes: vec![Node::new(name.as_str(), None)],
             ..Model::default()
         };
         for g in &groups {
@@ -237,9 +244,14 @@ impl Minecraft {
         let mut out = Vec::new();
         for n in self.assets.block_names() {
             if matches!(self.assets.classify_block(&n), Ok(None)) {
+                // a block with several states says which one `block/<name>` is
+                let name = match self.assets.default_state(&n) {
+                    Ok(Some(s)) => format!("{n} [{s}]"),
+                    _ => n,
+                };
                 out.push(AssetInfo {
-                    id: format!("block/{n}"),
-                    name: n,
+                    id: format!("block/{}", name.split(" [").next().unwrap_or(&name)),
+                    name,
                     kind: AssetKind::Prop,
                 });
             }
@@ -417,5 +429,32 @@ mod tests {
         assert_eq!(&img.rgba[0..4], &[0, 200, 0, 255]);
         let plain = mc().load("block/leaves").unwrap();
         assert_eq!(plain.materials[0].name, "block/leaf#tint0");
+    }
+
+    #[test]
+    fn the_model_name_carries_the_state_that_was_chosen() {
+        let m = mc();
+        // `step` has two states and no default in the data: the first is used and the name says so
+        let model = m.load("block/step").unwrap();
+        assert_eq!(model.name, "block/step?variant=facing=north");
+        // a state that was given keeps its id
+        let model = m.load("block/step?variant=facing=east").unwrap();
+        assert_eq!(model.name, "block/step?variant=facing=east");
+        // a block with nothing to choose keeps its plain id
+        assert_eq!(m.load("block/cube").unwrap().name, "block/cube");
+        // properties the file does not mention do not fail the load
+        assert!(m.load("block/step?variant=waterlogged=true").is_ok());
+    }
+
+    #[test]
+    fn the_listing_says_which_state_each_multi_state_block_is() {
+        let m = mc();
+        let l = m.list("step").unwrap();
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].id, "block/step");
+        assert_eq!(l[0].name, "step [facing=north]");
+        // the id is unchanged, and the name still filters
+        assert_eq!(m.list("facing=north").unwrap().len(), 1);
+        assert_eq!(m.list("cube").unwrap()[0].name, "cube");
     }
 }

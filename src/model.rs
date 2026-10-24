@@ -150,17 +150,57 @@ fn num_array<const N: usize>(v: &Value, what: &str) -> Result<[f64; N]> {
         .ok_or_else(|| anyhow!("{what}: expected a list of {N} numbers"))?;
     let mut out = [0.0; N];
     for (i, x) in a.iter().enumerate() {
-        out[i] = x
+        let n = x
             .as_f64()
             .ok_or_else(|| anyhow!("{what}: entry {i} is not a number"))?;
+        if !n.is_finite() {
+            bail!("{what}: entry {i} is not finite");
+        }
+        out[i] = n;
     }
     Ok(out)
 }
 
+/// The range the game accepts for an element's `from` and `to`
+pub const POSITION_RANGE: (f64, f64) = (-16.0, 32.0);
+
+fn position(v: &Value, what: &str) -> Result<[f64; 3]> {
+    let p = num_array::<3>(v, what)?;
+    if p.iter()
+        .any(|c| *c < POSITION_RANGE.0 || *c > POSITION_RANGE.1)
+    {
+        bail!(
+            "{what} {p:?} is outside the {} to {} the game accepts",
+            POSITION_RANGE.0,
+            POSITION_RANGE.1
+        );
+    }
+    Ok(p)
+}
+
+/// A whole number written as `90` or `90.0` (the game reads both); anything else is an error,
+/// never a silent 0
+fn whole(v: &Value, what: &str) -> Result<i64> {
+    if let Some(i) = v.as_i64() {
+        return Ok(i);
+    }
+    match v.as_f64() {
+        Some(f) if f.is_finite() && f.fract() == 0.0 && f.abs() < 1e12 => Ok(f as i64),
+        _ => bail!("{what} is not a whole number"),
+    }
+}
+
+fn opt_bool(o: &serde_json::Map<String, Value>, key: &str) -> Result<Option<bool>> {
+    match o.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(b)) => Ok(Some(*b)),
+        Some(_) => bail!("`{key}` is not true or false"),
+    }
+}
+
 impl RawModel {
-    pub fn parse(text: &str) -> Result<RawModel> {
-        let v: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
-            .context("model is not JSON")?;
+    pub fn parse(text: impl AsRef<[u8]>) -> Result<RawModel> {
+        let v: Value = crate::jar::parse_json(text.as_ref()).context("model is not JSON")?;
         let Some(o) = v.as_object() else {
             bail!("model is not an object");
         };
@@ -224,8 +264,8 @@ fn parse_element(v: &Value) -> Result<Element> {
     let Some(o) = v.as_object() else {
         bail!("element is not an object");
     };
-    let from = num_array::<3>(o.get("from").ok_or_else(|| anyhow!("no `from`"))?, "from")?;
-    let to = num_array::<3>(o.get("to").ok_or_else(|| anyhow!("no `to`"))?, "to")?;
+    let from = position(o.get("from").ok_or_else(|| anyhow!("no `from`"))?, "from")?;
+    let to = position(o.get("to").ok_or_else(|| anyhow!("no `to`"))?, "to")?;
     let rotation = match o.get("rotation") {
         None | Some(Value::Null) => None,
         Some(r) => Some(parse_rotation(r).context("rotation")?),
@@ -241,7 +281,7 @@ fn parse_element(v: &Value) -> Result<Element> {
             .ok_or_else(|| anyhow!("face {k} is not an object"))?;
         let uv = match fobj.get("uv") {
             None => None,
-            Some(u) => Some(num_array::<4>(u, "uv")?),
+            Some(u) => Some(num_array::<4>(u, "uv").with_context(|| format!("face {k}"))?),
         };
         let texture = fobj
             .get("texture")
@@ -254,16 +294,20 @@ fn parse_element(v: &Value) -> Result<Element> {
             .get("cullface")
             .and_then(|c| c.as_str())
             .and_then(Dir::parse);
-        let rot = fobj.get("rotation").and_then(|r| r.as_i64()).unwrap_or(0);
+        let rot = match fobj.get("rotation") {
+            None | Some(Value::Null) => 0,
+            Some(r) => whole(r, "rotation").with_context(|| format!("face {k}"))?,
+        };
         if rot.rem_euclid(90) != 0 {
             bail!("face {k}: rotation {rot} is not a multiple of 90");
         }
         // A negative tint index means "none" in the game
-        let tintindex = fobj
-            .get("tintindex")
-            .and_then(|t| t.as_i64())
-            .filter(|t| *t >= 0)
-            .map(|t| t as u32);
+        let tintindex = match fobj.get("tintindex") {
+            None | Some(Value::Null) => None,
+            Some(t) => Some(whole(t, "tintindex").with_context(|| format!("face {k}"))?)
+                .filter(|t| *t >= 0)
+                .map(|t| t.min(u32::MAX as i64) as u32),
+        };
         faces.push((
             dir,
             Face {
@@ -275,27 +319,39 @@ fn parse_element(v: &Value) -> Result<Element> {
             },
         ));
     }
+    let light_emission = match o.get("light_emission") {
+        None | Some(Value::Null) => 0,
+        Some(n) => whole(n, "light_emission")?.clamp(0, 15) as u8,
+    };
     Ok(Element {
         from,
         to,
         rotation,
-        shade: o.get("shade").and_then(|b| b.as_bool()).unwrap_or(true),
-        light_emission: o
-            .get("light_emission")
-            .and_then(|n| n.as_u64())
-            .unwrap_or(0)
-            .min(15) as u8,
+        shade: opt_bool(o, "shade")?.unwrap_or(true),
+        light_emission,
         faces,
     })
 }
 
+/// `origin` is required (every rotation in the eight jars has one), and so are the three angles of
+/// the Euler form: nothing is assumed where the data always speaks
 fn parse_rotation(v: &Value) -> Result<ElementRotation> {
     let Some(o) = v.as_object() else {
         bail!("not an object");
     };
-    let origin = match o.get("origin") {
-        Some(x) => num_array::<3>(x, "origin")?,
-        None => [8.0, 8.0, 8.0],
+    let origin = num_array::<3>(
+        o.get("origin")
+            .ok_or_else(|| anyhow!("no `origin` (the data always gives one)"))?,
+        "origin",
+    )?;
+    let angle_of = |v: &Value, what: &str| -> Result<f64> {
+        let a = v
+            .as_f64()
+            .ok_or_else(|| anyhow!("{what} is not a number"))?;
+        if !a.is_finite() {
+            bail!("{what} is not finite");
+        }
+        Ok(a)
     };
     if let (Some(axis), Some(angle)) = (o.get("axis"), o.get("angle")) {
         let axis = match axis.as_str() {
@@ -304,22 +360,32 @@ fn parse_rotation(v: &Value) -> Result<ElementRotation> {
             Some("z") => Axis::Z,
             _ => bail!("axis is not x, y or z"),
         };
+        let angle = angle_of(angle, "angle")?;
+        let rescale = opt_bool(o, "rescale")?.unwrap_or(false);
+        if rescale && angle.abs() > 45.0 {
+            // 1 / cos(angle) grows without bound; the game accepts -45 to 45 for these
+            bail!("`rescale` with angle {angle}: only -45 to 45 degrees is defined");
+        }
         return Ok(ElementRotation::Axis {
             origin,
             axis,
-            angle: angle
-                .as_f64()
-                .ok_or_else(|| anyhow!("angle is not a number"))?,
-            rescale: o.get("rescale").and_then(|b| b.as_bool()).unwrap_or(false),
+            angle,
+            rescale,
         });
     }
     if o.contains_key("x") || o.contains_key("y") || o.contains_key("z") {
-        let g = |k: &str| o.get(k).and_then(|n| n.as_f64()).unwrap_or(0.0);
+        let g = |k: &str| -> Result<f64> {
+            angle_of(
+                o.get(k)
+                    .ok_or_else(|| anyhow!("Euler rotation without `{k}`"))?,
+                k,
+            )
+        };
         return Ok(ElementRotation::Euler {
             origin,
-            x: g("x"),
-            y: g("y"),
-            z: g("z"),
+            x: g("x")?,
+            y: g("y")?,
+            z: g("z")?,
         });
     }
     bail!("neither axis and angle, nor x, y, z")
@@ -650,5 +716,73 @@ mod tests {
         assert!(RawModel::parse(r##"{"elements":[{"from":[0,0,0],"to":[1,1,1],"faces":{"sideways":{"texture":"#a"}}}]}"##).is_err());
         assert!(RawModel::parse("[]").is_err());
         assert!(normalize_location("other:thing").is_err());
+    }
+
+    fn elem(extra: &str) -> String {
+        format!(
+            r##"{{"elements":[{{"from":[0,0,0],"to":[16,16,16]{extra},"faces":{{"up":{{"texture":"#a"}}}}}}]}}"##
+        )
+    }
+
+    #[test]
+    fn from_and_to_must_be_finite_and_in_the_games_range() {
+        assert!(RawModel::parse(elem("")).is_ok());
+        for bad in [
+            r##"{"elements":[{"from":[0,0,0],"to":[1e300,1,1],"faces":{"up":{"texture":"#a"}}}]}"##,
+            r##"{"elements":[{"from":[-16.5,0,0],"to":[1,1,1],"faces":{"up":{"texture":"#a"}}}]}"##,
+            r##"{"elements":[{"from":[0,0,0],"to":[1,32.5,1],"faces":{"up":{"texture":"#a"}}}]}"##,
+        ] {
+            let e = RawModel::parse(bad).unwrap_err();
+            assert!(
+                format!("{e:#}").contains("range") || format!("{e:#}").contains("accept"),
+                "{e:#}"
+            );
+        }
+        // the edges of the range are fine
+        assert!(RawModel::parse(r##"{"elements":[{"from":[-16,-16,-16],"to":[32,32,32],"faces":{"up":{"texture":"#a"}}}]}"##).is_ok());
+        // 1e999 is not a number serde_json will hand over
+        assert!(RawModel::parse(
+            r##"{"elements":[{"from":[0,0,0],"to":[1e999,1,1],"faces":{"up":{"texture":"#a"}}}]}"##
+        )
+        .is_err());
+        // uv too
+        assert!(RawModel::parse(r##"{"elements":[{"from":[0,0,0],"to":[1,1,1],"faces":{"up":{"texture":"#a","uv":[0,0,1e999,1]}}}]}"##).is_err());
+    }
+
+    #[test]
+    fn a_rotation_without_an_origin_is_an_error_not_the_block_centre() {
+        let e = RawModel::parse(elem(r#","rotation":{"axis":"y","angle":22.5}"#)).unwrap_err();
+        assert!(format!("{e:#}").contains("origin"), "{e:#}");
+        let e =
+            RawModel::parse(elem(r#","rotation":{"origin":[8,8,8],"x":10,"y":20}"#)).unwrap_err();
+        assert!(format!("{e:#}").contains("`z`"), "{e:#}");
+        assert!(RawModel::parse(elem(
+            r#","rotation":{"origin":[8,8,8],"axis":"y","angle":22.5,"rescale":true}"#
+        ))
+        .is_ok());
+        // rescale grows with 1 / cos: undefined past 45 degrees
+        assert!(RawModel::parse(elem(
+            r#","rotation":{"origin":[8,8,8],"axis":"y","angle":89.9,"rescale":true}"#
+        ))
+        .is_err());
+    }
+
+    #[test]
+    fn whole_numbers_written_with_a_fraction_part_are_read_as_the_game_does() {
+        let m = RawModel::parse(
+            r##"{"elements":[{"from":[0,0,0],"to":[1,1,1],"faces":{"up":{"texture":"#a","rotation":90.0,"tintindex":1.0}}}]}"##,
+        )
+        .unwrap();
+        let f = &m.elements.unwrap()[0].faces[0].1;
+        assert_eq!(f.rotation, 90);
+        assert_eq!(f.tintindex, Some(1));
+        for bad in [
+            r##"{"elements":[{"from":[0,0,0],"to":[1,1,1],"faces":{"up":{"texture":"#a","rotation":45.5}}}]}"##,
+            r##"{"elements":[{"from":[0,0,0],"to":[1,1,1],"faces":{"up":{"texture":"#a","rotation":"90"}}}]}"##,
+            r##"{"elements":[{"from":[0,0,0],"to":[1,1,1],"faces":{"up":{"texture":"#a","tintindex":0.5}}}]}"##,
+            r##"{"elements":[{"from":[0,0,0],"to":[1,1,1],"shade":"no","faces":{"up":{"texture":"#a"}}}]}"##,
+        ] {
+            assert!(RawModel::parse(bad).is_err(), "{bad}");
+        }
     }
 }

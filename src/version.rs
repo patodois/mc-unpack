@@ -139,8 +139,7 @@ pub fn detect_layout(jar: &Jar) -> Layout {
 }
 
 pub fn read_version_json(jar: &Jar) -> Option<VersionJson> {
-    let text = jar.read_string("version.json").ok()?;
-    let v: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let v = crate::jar::parse_json(&jar.read_json("version.json").ok()?).ok()?;
     let id = v
         .get("id")
         .or_else(|| v.get("name"))

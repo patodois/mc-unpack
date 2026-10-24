@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 
 use crate::assets::BakedModel;
@@ -21,6 +21,19 @@ use crate::texture::{encode_png, AlphaClass, Rgba};
 const NEAREST: u32 = 9728;
 const CLAMP_TO_EDGE: u32 = 33071;
 
+/// Percent-encodes a file name for a glTF `uri` (anything but unreserved characters)
+fn uri_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
+
 fn pad4(buf: &mut Vec<u8>) {
     while buf.len() % 4 != 0 {
         buf.push(0);
@@ -29,6 +42,9 @@ fn pad4(buf: &mut Vec<u8>) {
 
 /// Writes `model` (already grouped by [`crate::mesh::build`]) and returns the `.gltf` path
 pub fn write(model: &BakedModel, groups: &[Group], name: &str, out_dir: &Path) -> Result<PathBuf> {
+    if groups.is_empty() {
+        bail!("{}: nothing to write (no geometry)", model.id);
+    }
     fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
     let mut bin: Vec<u8> = Vec::new();
     let mut views: Vec<Value> = Vec::new();
@@ -117,7 +133,7 @@ pub fn write(model: &BakedModel, groups: &[Group], name: &str, out_dir: &Path) -
                         data: g.image.data.clone(),
                     })?,
                 )?;
-                images.push(json!({"uri": file}));
+                images.push(json!({"uri": uri_encode(&file)}));
                 image_ids.insert(key, n);
                 n
             }
@@ -164,7 +180,7 @@ pub fn write(model: &BakedModel, groups: &[Group], name: &str, out_dir: &Path) -
         "scenes": [{"nodes": [0]}],
         "nodes": [{"name": name, "mesh": 0}],
         "meshes": [{"name": model.id, "primitives": primitives}],
-        "buffers": [{"uri": bin_name, "byteLength": bin.len()}],
+        "buffers": [{"uri": uri_encode(&bin_name), "byteLength": bin.len()}],
         "bufferViews": views,
         "accessors": accessors,
         "samplers": [{"magFilter": NEAREST, "minFilter": NEAREST, "wrapS": CLAMP_TO_EDGE, "wrapT": CLAMP_TO_EDGE}],
@@ -209,6 +225,30 @@ mod tests {
         let bin_len = fs::metadata(dir.join("cube.bin")).unwrap().len();
         assert_eq!(doc["buffers"][0]["byteLength"], bin_len);
         assert!(dir.join("cube_0.png").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn zero_groups_is_an_error_not_an_invalid_file() {
+        let a = tiny();
+        let b = a.bake_block("chest", &State::default()).unwrap();
+        let dir = std::env::temp_dir().join(format!("mc-unpack-gltf0-{}", std::process::id()));
+        assert!(write(&b, &[], "chest", &dir).is_err());
+        assert!(!dir.join("chest.gltf").exists());
+    }
+
+    #[test]
+    fn uris_are_percent_encoded() {
+        assert_eq!(uri_encode("a b#c%d_é.png"), "a%20b%23c%25d_%C3%A9.png");
+        let a = tiny();
+        let b = a.bake_block("cube", &State::default()).unwrap();
+        let groups = build(&a, &b, &MeshOptions::default()).unwrap();
+        let dir = std::env::temp_dir().join(format!("mc-unpack-gltfu-{}", std::process::id()));
+        let p = write(&b, &groups, "my model #1", &dir).unwrap();
+        let doc: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+        assert_eq!(doc["buffers"][0]["uri"], "my%20model%20%231.bin");
+        assert_eq!(doc["images"][0]["uri"], "my%20model%20%231_0.png");
+        assert!(dir.join("my model #1.bin").exists());
         fs::remove_dir_all(&dir).unwrap();
     }
 

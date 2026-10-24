@@ -108,9 +108,8 @@ pub struct Selection<'a> {
 }
 
 impl BlockState {
-    pub fn parse(text: &str) -> Result<BlockState> {
-        let v: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
-            .context("blockstate is not JSON")?;
+    pub fn parse(text: impl AsRef<[u8]>) -> Result<BlockState> {
+        let v: Value = crate::jar::parse_json(text.as_ref()).context("blockstate is not JSON")?;
         let Some(o) = v.as_object() else {
             bail!("blockstate is not an object");
         };
@@ -261,6 +260,21 @@ impl BlockState {
         m
     }
 
+    /// Splits `state` into the properties this file mentions and the ones it does not
+    pub fn split_known(&self, state: &State) -> (State, Vec<String>) {
+        let known = self.properties();
+        let mut keep = BTreeMap::new();
+        let mut ignored = Vec::new();
+        for (k, v) in &state.0 {
+            if known.contains(k) {
+                keep.insert(k.clone(), v.clone());
+            } else {
+                ignored.push(k.clone());
+            }
+        }
+        (State(keep), ignored)
+    }
+
     /// Picks what `state` selects.
     ///
     /// - **variants**: the first entry (in file order) whose key agrees with every property of
@@ -268,16 +282,14 @@ impl BlockState {
     ///   `normal` if there is one, else the first entry of the file. The game's real default state
     ///   is in code, so for a block such as stairs, whose keys are all complete, name the state you
     ///   want.
+    ///   A property the file does not mention is ignored and listed in [`Selection::ignored`].
     /// - **multipart**: every part without `when`, and every part whose `when` holds. A property
     ///   missing from `state` never matches a positive condition (and always matches a negated one).
     pub fn select(&self, state: &State) -> Result<Selection<'_>> {
-        let known = self.properties();
-        let ignored: Vec<String> = state
-            .0
-            .keys()
-            .filter(|k| !known.contains(k))
-            .cloned()
-            .collect();
+        // A property the file never mentions cannot choose anything. A state made only of such
+        // properties is the empty state: the default is used and the properties are listed.
+        let (state, ignored) = self.split_known(state);
+        let state = &state;
         if !self.variants.is_empty() {
             let mut candidates = 0;
             let mut found: Option<&(String, Choice)> = None;
@@ -379,8 +391,20 @@ fn parse_variant(v: &Value) -> Result<Variant> {
         model,
         x: rot("x")?,
         y: rot("y")?,
-        uvlock: o.get("uvlock").and_then(|b| b.as_bool()).unwrap_or(false),
-        weight: o.get("weight").and_then(|n| n.as_u64()).unwrap_or(1) as u32,
+        uvlock: match o.get("uvlock") {
+            None | Some(Value::Null) => false,
+            Some(Value::Bool(b)) => *b,
+            Some(_) => bail!("`uvlock` is not true or false"),
+        },
+        // `weight` defaults to 1 in the format
+        weight: match o.get("weight") {
+            None | Some(Value::Null) => 1,
+            Some(w) => w
+                .as_u64()
+                .filter(|w| *w >= 1 && *w <= u32::MAX as u64)
+                .ok_or_else(|| anyhow::anyhow!("`weight` is not a positive whole number"))?
+                as u32,
+        },
     })
 }
 
@@ -602,5 +626,31 @@ mod tests {
     fn state_keys_round_trip() {
         let s = State::parse("b=2,a=1").unwrap();
         assert_eq!(s.to_key(), "a=1,b=2");
+    }
+
+    #[test]
+    fn a_state_made_only_of_unknown_properties_is_the_empty_state() {
+        let b = BlockState::parse(STAIRS).unwrap();
+        let s = b
+            .select(&State::parse("waterlogged=true").unwrap())
+            .unwrap();
+        assert_eq!(s.ignored, vec!["waterlogged"]);
+        assert_eq!(s.key.as_deref(), Some("facing=east,half=bottom"));
+        assert_eq!(s.chosen.len(), 1);
+        let f = BlockState::parse(FENCE).unwrap();
+        let s = f.select(&State::parse("power=2").unwrap()).unwrap();
+        assert_eq!(s.chosen[0].model, "post");
+        assert_eq!(s.ignored, vec!["power"]);
+    }
+
+    #[test]
+    fn variant_fields_of_the_wrong_type_are_errors() {
+        for bad in [
+            r#"{"variants":{"":{"model":"m","uvlock":"yes"}}}"#,
+            r#"{"variants":{"":{"model":"m","weight":0}}}"#,
+            r#"{"variants":{"":{"model":"m","weight":"3"}}}"#,
+        ] {
+            assert!(BlockState::parse(bad).is_err(), "{bad}");
+        }
     }
 }

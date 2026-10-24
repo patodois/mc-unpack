@@ -19,6 +19,32 @@ use crate::version::{self, Layout, Support, VersionInfo};
 
 const ROOT: &str = "assets/minecraft";
 
+/// Data this crate will not guess about: ambiguous, over a safety limit, or made of a rule that is
+/// in the game's code. Reported as [`LeftOut::Refused`] with the reason.
+#[derive(Debug)]
+pub struct Refused(pub String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// A model that has nothing to draw from data, as an error (so that a caller that wanted a
+/// drawing can tell it from a failure)
+#[derive(Debug)]
+pub struct NotData(pub String, pub LeftOut);
+
+impl std::fmt::Display for NotData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.0, self.1)
+    }
+}
+
+impl std::error::Error for NotData {}
+
 /// The geometry of one model plus the tints that came with it
 #[derive(Clone, Debug)]
 pub struct Part {
@@ -44,6 +70,9 @@ pub enum LeftOut {
     /// Every face names a texture that cannot exist, so the game would draw only its built-in
     /// missing-texture pattern (Mojang's `heavy_core` model writes `all` where `#all` was meant)
     MissingTexture,
+    /// Something this crate will not guess about (ambiguous data, a size over its safety limit);
+    /// the text says what and why
+    Refused(String),
     /// A model other models inherit from (`item/generated`, `item/handheld`): no texture of its own
     Template,
 }
@@ -66,6 +95,7 @@ impl std::fmt::Display for LeftOut {
                 f,
                 "every face names a texture that does not exist; the game draws its built-in missing-texture pattern (code, not data)"
             ),
+            LeftOut::Refused(why) => write!(f, "refused: {why}"),
             LeftOut::Template => write!(f, "a template other models inherit from, not an item"),
         }
     }
@@ -81,6 +111,15 @@ pub struct Report {
     pub candidates: usize,
     pub notes: Vec<String>,
     pub left_out: Option<LeftOut>,
+    /// Parts of an item that failed to bake (a missing texture in one model of a composite, say)
+    /// while others did. Each is also a line in `notes`; `check` counts them as failures.
+    pub failed_parts: Vec<String>,
+    /// Parts of an item left out (drawn by code, or refused) while others were baked; empty when
+    /// the whole item is left out (then `left_out` says why)
+    pub dropped_parts: Vec<String>,
+    /// The state the model was built from, written as the `?variant=` text that reproduces it:
+    /// the blockstate entry used, or the given state, or the one derived for a multipart block
+    pub state_used: Option<String>,
 }
 
 /// A block or an item, baked
@@ -289,7 +328,7 @@ impl Assets {
         if !self.jar.contains(&path) {
             bail!("no blockstate `{name}` in Minecraft {}", self.version.id);
         }
-        let text = self.jar.read_string(&path)?;
+        let text = self.jar.read_json(&path)?;
         let b = Arc::new(BlockState::parse(&text).with_context(|| path.clone())?);
         self.blockstates.lock().unwrap().insert(name, b.clone());
         Ok(b)
@@ -301,7 +340,7 @@ impl Assets {
             return Ok(m.clone());
         }
         let path = format!("{ROOT}/models/{id}.json");
-        let text = self.jar.read_string(&path)?;
+        let text = self.jar.read_json(&path)?;
         let m = Arc::new(RawModel::parse(&text).with_context(|| path.clone())?);
         self.raw_models
             .lock()
@@ -355,11 +394,11 @@ impl Assets {
             }
             bail!("no texture `{path}` in Minecraft {}", self.version.id);
         }
-        let img = decode_png(&self.jar.read(&entry)?).with_context(|| entry.clone())?;
+        let img = decode_png(&self.jar.read_png(&entry)?).with_context(|| entry.clone())?;
         let meta_entry = format!("{entry}.mcmeta");
         let meta = if self.jar.contains(&meta_entry) {
             Some(
-                McMeta::parse(&self.jar.read_string(&meta_entry)?)
+                McMeta::parse(self.jar.read_json(&meta_entry)?)
                     .with_context(|| meta_entry.clone())?,
             )
         } else {
@@ -379,10 +418,10 @@ impl Assets {
                 .names_under(&prefix)
                 .filter(|n| n.ends_with(".json"))
             {
-                let Ok(text) = self.jar.read_string(n) else {
+                let Ok(text) = self.jar.read_json(n) else {
                     continue;
                 };
-                let Ok(v) = serde_json::from_str::<Value>(&text) else {
+                let Ok(v) = crate::jar::parse_json(&text) else {
                     continue;
                 };
                 let Some(sources) = v.get("sources").and_then(|s| s.as_array()) else {
@@ -428,9 +467,12 @@ impl Assets {
         })
     }
 
+    /// Builds a `paletted_permutations` texture. The game's rules for the awkward cases (a colour
+    /// twice in the key palette, a key texel that is transparent, palettes of different sizes) are
+    /// not in the data, so those palettes are refused rather than guessed at.
     fn permute(&self, src: &PermSource) -> Result<Texture> {
         let load = |p: &str| -> Result<crate::texture::Rgba> {
-            decode_png(&self.jar.read(&format!("{ROOT}/textures/{p}.png"))?)
+            decode_png(&self.jar.read_png(&format!("{ROOT}/textures/{p}.png"))?)
                 .with_context(|| p.to_string())
         };
         let (key, pal, mut img) = (
@@ -438,22 +480,48 @@ impl Assets {
             load(&src.palette)?,
             load(&src.base)?,
         );
-        let n = (key.width * key.height).min(pal.width * pal.height) as usize;
+        let n = key.data.len() / 4;
+        if pal.data.len() / 4 != n {
+            return Err(Refused(format!(
+                "palette {} has {} colours and the key {} has {n}",
+                src.palette,
+                pal.data.len() / 4,
+                src.palette_key
+            ))
+            .into());
+        }
+        if key.data.chunks_exact(4).any(|p| p[3] != 255)
+            || pal.data.chunks_exact(4).any(|p| p[3] != 255)
+        {
+            return Err(Refused(format!(
+                "palette {} or its key has transparent colours; what the game does with them is not in the data",
+                src.palette
+            ))
+            .into());
+        }
         // palette key colour -> replacement colour, by position in the two palettes
-        let map: Vec<([u8; 3], [u8; 4])> = (0..n)
+        let map: Vec<([u8; 3], [u8; 3])> = (0..n)
             .map(|i| {
                 let k = &key.data[i * 4..i * 4 + 3];
-                let p = &pal.data[i * 4..i * 4 + 4];
-                ([k[0], k[1], k[2]], [p[0], p[1], p[2], p[3]])
+                let p = &pal.data[i * 4..i * 4 + 3];
+                ([k[0], k[1], k[2]], [p[0], p[1], p[2]])
             })
             .collect();
+        for (i, (k, _)) in map.iter().enumerate() {
+            if map[..i].iter().any(|(k2, _)| k2 == k) {
+                return Err(Refused(format!(
+                    "the key palette {} has a colour twice; which replacement the game picks is not in the data",
+                    src.palette_key
+                ))
+                .into());
+            }
+        }
         for px in img.data.chunks_exact_mut(4) {
             if px[3] == 0 {
                 continue;
             }
             if let Some((_, to)) = map.iter().find(|(k, _)| k[..] == px[..3]) {
-                px[..3].copy_from_slice(&to[..3]);
-                px[3] = ((px[3] as u32 * to[3] as u32) / 255) as u8;
+                px[..3].copy_from_slice(to);
             }
         }
         Texture::new(img, None)
@@ -489,7 +557,7 @@ impl Assets {
                 kind.name()
             );
         }
-        let c = Arc::new(Colormap::new(decode_png(&self.jar.read(entry)?)?)?);
+        let c = Arc::new(Colormap::new(decode_png(&self.jar.read_png(entry)?)?)?);
         self.colormaps.lock().unwrap().insert(kind, c.clone());
         Ok(c)
     }
@@ -515,7 +583,7 @@ impl Assets {
                 self.biome_names().len()
             );
         }
-        Biome::parse(&name, &self.jar.read_string(&entry)?)
+        Biome::parse(&name, self.jar.read_json(&entry)?)
     }
 
     pub fn tint_rgb(&self, t: &Tint) -> Result<[u8; 3]> {
@@ -556,7 +624,7 @@ impl Assets {
             .any(|(_, f)| {
                 m.texture(&f.texture)
                     .map(|t| t.path.contains('/') || self.has_texture(&t.path))
-                    .unwrap_or(true)
+                    .unwrap_or(false)
             });
         if any {
             None
@@ -626,6 +694,26 @@ impl Assets {
         dropped
     }
 
+    /// The state `bake_block` builds when none is given, as `?variant=` text: the blockstate entry
+    /// it takes (the file's `normal` or empty one, else its first), or for a multipart block that
+    /// needs properties the first state its conditions describe. `None`: the file has no choice
+    /// to make (one entry without properties, or only unconditional parts).
+    pub fn default_state(&self, name: &str) -> Result<Option<String>> {
+        let bs = self.blockstate(name)?;
+        let sel = bs.select(&State::default())?;
+        let key = match (&sel.key, sel.chosen.is_empty() && bs.is_multipart()) {
+            (Some(k), _) => Some(k.clone()),
+            (None, true) => bs.first_applying_state().map(|s| s.to_key()),
+            _ => None,
+        };
+        Ok(key.filter(|k| {
+            !k.is_empty()
+                && k != "normal"
+                && k != "inventory"
+                && (sel.candidates > 1 || sel.key.is_none())
+        }))
+    }
+
     /// Bakes a block in a state. An empty `state` takes the blockstate file's first/`normal`
     /// variant (see [`BlockState::select`]).
     pub fn bake_block(&self, name: &str, state: &State) -> Result<BakedModel> {
@@ -633,8 +721,10 @@ impl Assets {
         let name = normalize_location(name)?;
         let bs = self.blockstate(&name)?;
         let mut sel = bs.select(state)?;
+        // What the state says once the properties this file does not mention are set aside
+        let (known, _) = bs.split_known(state);
         let mut derived = None;
-        if state.is_empty() && sel.chosen.is_empty() && bs.is_multipart() {
+        if known.is_empty() && sel.chosen.is_empty() && bs.is_multipart() {
             // Nothing unconditional applies: use the first state the file's own conditions describe
             if let Some(st) = bs.first_applying_state() {
                 sel = bs.select(&st)?;
@@ -647,13 +737,27 @@ impl Assets {
             candidates: sel.candidates,
             ..Report::default()
         };
+        report.state_used = match (&sel.key, &derived) {
+            (Some(k), _) => Some(k.clone()),
+            (None, Some(k)) => Some(k.clone()),
+            (None, None) if !known.is_empty() => Some(known.to_key()),
+            _ => None,
+        }
+        // the empty and `normal` entries of a variants file are "no properties"
+        .filter(|k| !k.is_empty() && k != "normal" && k != "inventory");
+        if !report.ignored_properties.is_empty() {
+            report.notes.push(format!(
+                "the blockstate does not mention {}: ignored",
+                report.ignored_properties.join(", ")
+            ));
+        }
         if let Some(k) = derived {
             report.notes.push(format!(
                 "no state given and no part is unconditional: used `{k}`, the first state the conditions describe"
             ));
         }
         if sel.candidates > 1 {
-            report.notes.push(if state.is_empty() {
+            report.notes.push(if known.is_empty() {
                 format!(
                     "no state given: used the entry `{}`, the file's `normal`/empty one or else its first of {}",
                     sel.key.clone().unwrap_or_default(),
@@ -676,7 +780,7 @@ impl Assets {
                 first_left_out.get_or_insert(lo);
                 continue;
             }
-            let mut quads = bake_model(
+            let (mut quads, face_notes) = bake_model(
                 &m,
                 VariantRotation {
                     x: v.x,
@@ -684,6 +788,7 @@ impl Assets {
                     uvlock: v.uvlock,
                 },
             )?;
+            report.notes.extend(face_notes);
             let before = quads.len();
             for t in self.drop_unnameable(&mut quads) {
                 if quads.is_empty() && before > 0 {
@@ -743,7 +848,7 @@ impl Assets {
                 self.version.id
             );
         }
-        serde_json::from_str(&self.jar.read_string(&path)?).with_context(|| path)
+        crate::jar::parse_json(&self.jar.read_json(&path)?).with_context(|| path)
     }
 
     /// The models an item uses by default: from its definition (1.21.4 and later) or
@@ -781,6 +886,7 @@ impl Assets {
                     bail!("{}: builtin/generated with no layer textures", m.id);
                 }
                 let mut quads = Vec::new();
+                let mut notes = Vec::new();
                 for (i, _) in &layers {
                     let reference = format!("#layer{i}");
                     let tex = m.texture(&reference)?;
@@ -788,7 +894,9 @@ impl Assets {
                         .texture(&tex.path)
                         .with_context(|| format!("{} {reference}", m.id))?;
                     let (w, h, opaque) = item::opacity_union(&t);
-                    for el in item::layer_elements(*i, &reference, w, h, &opaque) {
+                    for el in item::layer_elements(*i, &reference, w, h, &opaque)
+                        .with_context(|| m.id.clone())?
+                    {
                         bake_element(
                             &el,
                             VariantRotation::default(),
@@ -797,36 +905,40 @@ impl Assets {
                                 Ok((tp.path, tp.translucent))
                             },
                             &mut quads,
+                            &mut notes,
                         )?;
                     }
                 }
-                Ok((quads, Vec::new()))
+                Ok((quads, notes))
             }
-            Some(Builtin::Entity) => bail!("{}: {}", m.id, LeftOut::BuiltinEntity),
-            Some(Builtin::Other(ref o)) => {
-                bail!("{}: built-in root `builtin/{o}` is not data", m.id)
-            }
+            Some(Builtin::Entity) => Err(NotData(m.id.clone(), LeftOut::BuiltinEntity).into()),
+            Some(Builtin::Other(ref o)) => Err(NotData(
+                m.id.clone(),
+                LeftOut::Refused(format!("built-in root `builtin/{o}` is not data")),
+            )
+            .into()),
             None => {
                 if m.elements.is_empty() {
-                    bail!("{}: {}", m.id, LeftOut::NoElements);
+                    return Err(NotData(m.id.clone(), LeftOut::NoElements).into());
                 }
-                let mut quads = bake_model(&m, VariantRotation::default())?;
-                let notes = self
-                    .drop_unnameable(&mut quads)
-                    .into_iter()
-                    .map(|t| {
-                        format!(
-                            "{}: faces that name texture `{t}` were left out (no such texture; the game draws its built-in missing-texture pattern)",
-                            m.id
-                        )
-                    })
-                    .collect();
+                let (mut quads, mut notes) = bake_model(&m, VariantRotation::default())?;
+                notes.extend(self.drop_unnameable(&mut quads).into_iter().map(|t| {
+                    format!(
+                        "{}: faces that name texture `{t}` were left out (no such texture; the game draws its built-in missing-texture pattern)",
+                        m.id
+                    )
+                }));
                 Ok((quads, notes))
             }
         }
     }
 
-    /// Bakes an item by name (`diamond_sword`)
+    /// Bakes an item by name (`diamond_sword`).
+    ///
+    /// An item may be several models (a composite). Each part that cannot be baked leaves a line in
+    /// the report's notes: a part that is drawn by code (`special`, `builtin/entity`) or refused is
+    /// "left out"; a part that fails (a missing texture) is also listed in
+    /// [`Report::failed_parts`], which `check` counts as a failure.
     pub fn bake_item(&self, name: &str) -> Result<BakedModel> {
         let name = normalize_location(name)?;
         let def = self.item_default_models(&name)?;
@@ -836,7 +948,8 @@ impl Assets {
         };
         let mut parts = Vec::new();
         let mut first_err = None;
-        let mut missing_texture = false;
+        let mut left_outs: Vec<LeftOut> = Vec::new();
+        let mut all_faces_dropped = false;
         for r in &def.models {
             let id = normalize_location(&r.model)?;
             match self.bake_item_model(&id) {
@@ -849,7 +962,8 @@ impl Assets {
                         }
                     }
                     if quads.is_empty() {
-                        missing_texture = true;
+                        all_faces_dropped = true;
+                        report.notes.push(format!("{id}: every face was left out"));
                     } else {
                         parts.push(Part {
                             model: id,
@@ -859,29 +973,41 @@ impl Assets {
                     }
                 }
                 Err(e) => {
-                    first_err.get_or_insert(e);
+                    if let Some(nd) = e.downcast_ref::<NotData>() {
+                        report.notes.push(format!("{id}: left out: {}", nd.1));
+                        report.dropped_parts.push(format!("{id}: {}", nd.1));
+                        left_outs.push(nd.1.clone());
+                    } else if let Some(rf) = e.downcast_ref::<Refused>() {
+                        report.notes.push(format!("{id}: left out: refused: {rf}"));
+                        report.dropped_parts.push(format!("{id}: refused: {rf}"));
+                        left_outs.push(LeftOut::Refused(rf.0.clone()));
+                    } else {
+                        report.notes.push(format!("{id}: FAILED: {e:#}"));
+                        report.failed_parts.push(format!("{id}: {e:#}"));
+                        first_err.get_or_insert(e);
+                    }
                 }
             }
         }
-        if parts.is_empty() {
-            if !def.special.is_empty() {
-                report.left_out = Some(LeftOut::SpecialItem(def.special.clone()));
-            } else if missing_texture {
-                report.left_out = Some(LeftOut::MissingTexture);
-            } else if let Some(e) = first_err {
-                // `builtin/entity` items and models without geometry are "left out"; anything
-                // else (a missing texture) is a real failure
-                let msg = format!("{e:#}");
-                if msg.contains("builtin/entity") {
-                    report.left_out = Some(LeftOut::BuiltinEntity);
-                } else if msg.contains("no geometry") {
-                    report.left_out = Some(LeftOut::NoElements);
-                } else {
-                    return Err(e);
-                }
-            } else {
-                report.left_out = Some(LeftOut::NoElements);
+        if !parts.is_empty() {
+            for k in &def.special {
+                report.notes.push(format!(
+                    "a `special` model (`{k}`) is drawn by the game's code and was left out"
+                ));
+                report.dropped_parts.push(format!("special model `{k}`"));
             }
+        } else if !def.special.is_empty() {
+            report.dropped_parts.clear();
+            report.left_out = Some(LeftOut::SpecialItem(def.special.clone()));
+        } else if let Some(lo) = left_outs.into_iter().next() {
+            report.dropped_parts.clear();
+            report.left_out = Some(lo);
+        } else if all_faces_dropped {
+            report.left_out = Some(LeftOut::MissingTexture);
+        } else if let Some(e) = first_err {
+            return Err(e);
+        } else {
+            report.left_out = Some(LeftOut::NoElements);
         }
         Ok(BakedModel {
             id: format!("item/{name}"),
@@ -1204,5 +1330,320 @@ pub mod tests {
             a.classify_block("chest").unwrap(),
             Some(LeftOut::SpecialItem(vec!["chest".into()]))
         );
+    }
+
+    // ---- review fixes ----
+
+    const CUBE_FACES: &str = r##""faces":{"up":{"texture":"#all"},"north":{"texture":"#all"}}"##;
+
+    fn defs_jar(extra: Vec<(&str, Vec<u8>)>) -> Jar {
+        let mut b = JarBuilder::new()
+            .add("assets/minecraft/blockstates/x.json", r#"{"variants":{"":{"model":"block/m"}}}"#)
+            .add(
+                "assets/minecraft/models/block/m.json",
+                format!(r##"{{"textures":{{"all":"block/t"}},"elements":[{{"from":[0,0,0],"to":[16,16,16],{CUBE_FACES}}}]}}"##),
+            )
+            .add("assets/minecraft/models/item/generated.json", r#"{"parent":"builtin/generated"}"#)
+            .add("assets/minecraft/textures/block/t.png", png(2, 2, |_, _| [1, 2, 3, 255]))
+            .add("assets/minecraft/textures/item/ok.png", png(16, 16, |_, _| [1, 2, 3, 255]));
+        for (n, d) in extra {
+            b = b.add(n, d);
+        }
+        b.build()
+    }
+
+    #[test]
+    fn a_failed_part_of_a_composite_is_a_note_and_a_failed_part() {
+        let jar = defs_jar(vec![
+            (
+                "assets/minecraft/items/c.json",
+                br#"{"model":{"type":"minecraft:composite","models":[
+                {"type":"minecraft:model","model":"minecraft:item/ok"},
+                {"type":"minecraft:model","model":"minecraft:item/bad"}]}}"#
+                    .to_vec(),
+            ),
+            (
+                "assets/minecraft/models/item/ok.json",
+                br#"{"parent":"item/generated","textures":{"layer0":"item/ok"}}"#.to_vec(),
+            ),
+            // the second part names a texture that is not in the jar
+            (
+                "assets/minecraft/models/item/bad.json",
+                br#"{"parent":"item/generated","textures":{"layer0":"item/missing"}}"#.to_vec(),
+            ),
+        ]);
+        let a = Assets::from_jar(jar).unwrap();
+        let b = a.bake_item("c").unwrap();
+        assert_eq!(b.parts.len(), 1, "the good part is still there");
+        assert_eq!(b.report.failed_parts.len(), 1);
+        assert!(
+            b.report.failed_parts[0].contains("item/bad"),
+            "{:?}",
+            b.report.failed_parts
+        );
+        assert!(
+            b.report
+                .notes
+                .iter()
+                .any(|n| n.contains("FAILED") && n.contains("item/bad")),
+            "{:?}",
+            b.report.notes
+        );
+        // and the sweep counts the item as failed, not ok
+        let r = crate::check::run(&a).unwrap();
+        assert_eq!(r.items.failed, 1, "{:?}", r.failures);
+        assert!(
+            r.failures.iter().any(|f| f.contains("item part c")),
+            "{:?}",
+            r.failures
+        );
+    }
+
+    #[test]
+    fn a_dropped_special_in_a_composite_is_a_note_and_counted() {
+        let jar = defs_jar(vec![
+            ("assets/minecraft/items/c.json", br#"{"model":{"type":"minecraft:composite","models":[
+                {"type":"minecraft:model","model":"minecraft:item/ok"},
+                {"type":"minecraft:special","base":"minecraft:item/chest","model":{"type":"minecraft:chest","texture":"minecraft:normal"}}]}}"#.to_vec()),
+            ("assets/minecraft/models/item/ok.json", br#"{"parent":"item/generated","textures":{"layer0":"item/ok"}}"#.to_vec()),
+        ]);
+        let a = Assets::from_jar(jar).unwrap();
+        let b = a.bake_item("c").unwrap();
+        assert!(!b.is_empty());
+        assert!(
+            b.report
+                .notes
+                .iter()
+                .any(|n| n.contains("`special`") && n.contains("chest")),
+            "{:?}",
+            b.report.notes
+        );
+        assert_eq!(b.report.dropped_parts.len(), 1);
+        let r = crate::check::run(&a).unwrap();
+        assert_eq!(r.items_partial, 1);
+        assert_eq!(r.total_failed(), 0, "{:?}", r.failures);
+    }
+
+    #[test]
+    fn a_state_of_unknown_properties_falls_back_to_the_default_and_lists_them() {
+        let a = tiny();
+        // `step` has only facing= keys; `waterlogged` means nothing to it
+        let b = a
+            .bake_block("step", &State::parse("waterlogged=true").unwrap())
+            .unwrap();
+        assert!(!b.is_empty());
+        assert_eq!(b.report.ignored_properties, vec!["waterlogged"]);
+        assert_eq!(b.report.state_used.as_deref(), Some("facing=north"));
+        assert!(
+            b.report.notes.iter().any(|n| n.contains("waterlogged")),
+            "{:?}",
+            b.report.notes
+        );
+        // a multipart block asked for nothing it knows takes the unconditional parts
+        let f = a
+            .bake_block("fence", &State::parse("power=3").unwrap())
+            .unwrap();
+        assert_eq!(f.parts.len(), 1);
+        assert_eq!(f.report.ignored_properties, vec!["power"]);
+    }
+
+    #[test]
+    fn the_default_state_is_named() {
+        let a = tiny();
+        assert_eq!(
+            a.default_state("step").unwrap().as_deref(),
+            Some("facing=north")
+        );
+        assert_eq!(a.default_state("cube").unwrap(), None);
+        assert_eq!(a.default_state("fence").unwrap(), None);
+    }
+
+    #[test]
+    fn a_texture_variable_nothing_defines_leaves_that_face_out_not_the_model() {
+        let jar = JarBuilder::new()
+            .add("assets/minecraft/blockstates/x.json", r#"{"variants":{"":{"model":"block/m"}}}"#)
+            .add("assets/minecraft/models/block/m.json",
+                 r##"{"textures":{"all":"block/t"},"elements":[{"from":[0,0,0],"to":[16,16,16],"faces":{"up":{"texture":"#all"},"down":{"texture":"#nowhere"}}}]}"##)
+            .add("assets/minecraft/textures/block/t.png", png(2, 2, |_, _| [1, 2, 3, 255]))
+            .build();
+        let a = Assets::from_jar(jar).unwrap();
+        let b = a.bake_block("x", &State::default()).unwrap();
+        assert_eq!(b.quad_count(), 1);
+        assert!(
+            b.report
+                .notes
+                .iter()
+                .any(|n| n.contains("down face") && n.contains("#nowhere")),
+            "{:?}",
+            b.report.notes
+        );
+        let r = crate::check::run(&a).unwrap();
+        assert_eq!(r.total_failed(), 0, "{:?}", r.failures);
+        assert_eq!(
+            r.left_out_inside_models.len(),
+            1,
+            "{:?}",
+            r.left_out_inside_models
+        );
+    }
+
+    fn trim_jar(key: Vec<u8>, pal: Vec<u8>) -> Jar {
+        JarBuilder::new()
+            .add("assets/minecraft/blockstates/x.json", r#"{"variants":{"":{"model":"block/nothing"}}}"#)
+            .add("assets/minecraft/atlases/armor_trims.json",
+                 r#"{"sources":[{"type":"paletted_permutations","textures":["trims/items/boots_trim"],"palette_key":"trims/color_palettes/trim_palette","permutations":{"amethyst":"trims/color_palettes/amethyst"}}]}"#)
+            .add("assets/minecraft/textures/trims/items/boots_trim.png", png(2, 2, |x, _| if x == 0 { [10, 10, 10, 255] } else { [20, 20, 20, 255] }))
+            .add("assets/minecraft/textures/trims/color_palettes/trim_palette.png", key)
+            .add("assets/minecraft/textures/trims/color_palettes/amethyst.png", pal)
+            .add("assets/minecraft/models/item/generated.json", r#"{"parent":"builtin/generated"}"#)
+            .add("assets/minecraft/models/item/b.json", r#"{"parent":"item/generated","textures":{"layer0":"trims/items/boots_trim_amethyst"}}"#)
+            .build()
+    }
+
+    #[test]
+    fn a_palette_swap_is_made_when_the_palettes_are_unambiguous() {
+        let key = png(2, 1, |x, _| {
+            if x == 0 {
+                [10, 10, 10, 255]
+            } else {
+                [20, 20, 20, 255]
+            }
+        });
+        let pal = png(2, 1, |x, _| {
+            if x == 0 {
+                [200, 0, 0, 255]
+            } else {
+                [0, 200, 0, 255]
+            }
+        });
+        let a = Assets::from_jar(trim_jar(key, pal)).unwrap();
+        let t = a.texture("trims/items/boots_trim_amethyst").unwrap();
+        assert_eq!(t.sheet.pixel(0, 0), [200, 0, 0, 255]);
+        assert_eq!(t.sheet.pixel(1, 1), [0, 200, 0, 255]);
+    }
+
+    #[test]
+    fn ambiguous_palettes_are_refused_with_a_reason_not_truncated() {
+        let key2 = png(2, 1, |x, _| {
+            if x == 0 {
+                [10, 10, 10, 255]
+            } else {
+                [20, 20, 20, 255]
+            }
+        });
+        // a palette with a different number of colours
+        let pal3 = png(3, 1, |_, _| [200, 0, 0, 255]);
+        let a = Assets::from_jar(trim_jar(key2.clone(), pal3)).unwrap();
+        let e = a.texture("trims/items/boots_trim_amethyst").unwrap_err();
+        assert!(
+            e.downcast_ref::<Refused>()
+                .is_some_and(|r| r.0.contains("3 colours")),
+            "{e:#}"
+        );
+        let b = a.bake_item("b").unwrap();
+        assert!(
+            matches!(b.report.left_out, Some(LeftOut::Refused(ref w)) if w.contains("3 colours")),
+            "{:?}",
+            b.report.left_out
+        );
+        // a key with the same colour twice: which replacement wins is not in the data
+        let dup = png(2, 1, |_, _| [10, 10, 10, 255]);
+        let pal = png(2, 1, |x, _| {
+            if x == 0 {
+                [200, 0, 0, 255]
+            } else {
+                [0, 200, 0, 255]
+            }
+        });
+        let a = Assets::from_jar(trim_jar(dup, pal.clone())).unwrap();
+        let e = a.texture("trims/items/boots_trim_amethyst").unwrap_err();
+        assert!(
+            e.downcast_ref::<Refused>()
+                .is_some_and(|r| r.0.contains("twice")),
+            "{e:#}"
+        );
+        // a transparent palette colour
+        let tr = png(2, 1, |_, _| [200, 0, 0, 0]);
+        let a = Assets::from_jar(trim_jar(key2, tr)).unwrap();
+        assert!(a
+            .texture("trims/items/boots_trim_amethyst")
+            .unwrap_err()
+            .downcast_ref::<Refused>()
+            .is_some());
+    }
+
+    #[test]
+    fn a_huge_generated_layer_is_left_out_with_a_reason() {
+        // a checkerboard of alpha: one strip per pixel edge
+        let checker = png(64, 64, |x, y| {
+            if (x + y) % 2 == 0 {
+                [1, 1, 1, 255]
+            } else {
+                [0, 0, 0, 0]
+            }
+        });
+        let wide = png(200, 4, |_, _| [1, 1, 1, 255]);
+        let jar = defs_jar(vec![
+            (
+                "assets/minecraft/models/item/checker.json",
+                br#"{"parent":"item/generated","textures":{"layer0":"item/checker"}}"#.to_vec(),
+            ),
+            ("assets/minecraft/textures/item/checker.png", checker),
+            (
+                "assets/minecraft/models/item/wide.json",
+                br#"{"parent":"item/generated","textures":{"layer0":"item/wide"}}"#.to_vec(),
+            ),
+            ("assets/minecraft/textures/item/wide.png", wide),
+        ]);
+        let a = Assets::from_jar(jar).unwrap();
+        for n in ["checker", "wide"] {
+            let b = a.bake_item(n).unwrap();
+            assert!(b.is_empty(), "{n}");
+            assert!(
+                matches!(b.report.left_out, Some(LeftOut::Refused(_))),
+                "{n}: {:?}",
+                b.report.left_out
+            );
+        }
+        let b = a.bake_item("checker").unwrap();
+        assert!(b.report.left_out.unwrap().to_string().contains("elements"));
+        // the sweep does not call that a failure
+        let r = crate::check::run(&a).unwrap();
+        assert_eq!(r.total_failed(), 0, "{:?}", r.failures);
+    }
+
+    #[test]
+    fn the_first_listed_frame_is_what_a_model_gets() {
+        // a 2 x 4 sheet of two frames: frame 0 red, frame 1 green; the animation shows frame 1 first
+        let jar = JarBuilder::new()
+            .add("assets/minecraft/blockstates/x.json", r#"{"variants":{"":{"model":"block/m"}}}"#)
+            .add("assets/minecraft/models/block/m.json",
+                 r##"{"textures":{"all":"block/t"},"elements":[{"from":[0,0,0],"to":[16,16,16],"faces":{"up":{"texture":"#all"}}}]}"##)
+            .add("assets/minecraft/textures/block/t.png", png(2, 4, |_, y| if y < 2 { [255, 0, 0, 255] } else { [0, 255, 0, 255] }))
+            .add("assets/minecraft/textures/block/t.png.mcmeta", r#"{"animation":{"frames":[1,0]}}"#)
+            .build();
+        let a = Assets::from_jar(jar).unwrap();
+        let b = a.bake_block("x", &State::default()).unwrap();
+        let g = crate::mesh::build(&a, &b, &crate::mesh::MeshOptions::default()).unwrap();
+        assert_eq!(g[0].image.pixel(0, 0), [0, 255, 0, 255]);
+        let o = crate::mesh::MeshOptions {
+            frame: Some(0),
+            ..Default::default()
+        };
+        let g = crate::mesh::build(&a, &b, &o).unwrap();
+        assert_eq!(g[0].image.pixel(0, 0), [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn every_json_is_read_through_a_limit() {
+        let big = vec![b' '; (crate::jar::MAX_JSON as usize) + 1];
+        let mut json = br#"{"variants":{"":{"model":"block/m"}}}"#.to_vec();
+        json.extend_from_slice(&big);
+        let jar = JarBuilder::new()
+            .add("assets/minecraft/blockstates/x.json", json)
+            .build();
+        let a = Assets::from_jar(jar).unwrap();
+        let e = a.blockstate("x").unwrap_err();
+        assert!(format!("{e:#}").contains("limit"), "{e:#}");
     }
 }

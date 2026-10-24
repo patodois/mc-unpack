@@ -68,6 +68,18 @@ pub struct Report {
     pub failures: Vec<String>,
     /// Things in Mojang's files that are wrong and that the game tolerates; not counted as failures
     pub upstream_defects: Vec<String>,
+    /// Faces and elements left out inside models that otherwise bake (a texture variable nothing
+    /// defines, a rotation whose order the data does not give): each is a line, not a failure
+    pub left_out_inside_models: Vec<String>,
+    /// Items that lost a part to code or to a refusal (a `special` layer of a composite, say)
+    pub items_partial: u64,
+    /// The biggest things met, to be read against the safety limits (see
+    /// `texture::MAX_PIXELS`, `texture::MAX_SHEET_FRAMES`, `texture::MAX_FRAME_LIST`,
+    /// `item::MAX_LAYER_ELEMENTS`)
+    pub max_png_pixels: u64,
+    pub max_sheet_frames: u32,
+    pub max_frame_list: usize,
+    pub max_item_quads: usize,
     pub seconds: f64,
 }
 
@@ -100,6 +112,7 @@ fn left_out_key(l: &LeftOut) -> String {
         LeftOut::NoElements => "model without elements".into(),
         LeftOut::NoPartMatched => "no multipart part matched".into(),
         LeftOut::Template => "template".into(),
+        LeftOut::Refused(why) => format!("refused: {why}"),
         LeftOut::MissingTexture => {
             "every face names a texture that does not exist (upstream defect)".into()
         }
@@ -140,20 +153,24 @@ fn check_textures(a: &Assets, r: &mut Report) {
     for n in &names {
         let short = n.strip_prefix(prefix).unwrap_or(n);
         if let Some(png) = n.strip_suffix(".mcmeta") {
-            let res = (|| -> Result<bool> {
-                let meta = McMeta::parse(&jar.read_string(n)?)?;
+            let res = (|| -> Result<Option<(u32, usize)>> {
+                let meta = McMeta::parse(jar.read_json(n)?)?;
                 if meta.animation.is_some() && jar.contains(png) {
-                    let img = decode_png(&jar.read(png)?)?;
+                    let img = decode_png(&jar.read_png(png)?)?;
                     let t = Texture::new(img, Some(&meta))?;
-                    return Ok(t.animation.is_some());
+                    if let Some(an) = &t.animation {
+                        return Ok(Some((t.sheet_frames(), an.frames.len())));
+                    }
                 }
-                Ok(false)
+                Ok(None)
             })();
             match res {
                 Ok(anim) => {
                     r.mcmetas.ok += 1;
-                    if anim {
+                    if let Some((frames, listed)) = anim {
                         r.animated_textures += 1;
+                        r.max_sheet_frames = r.max_sheet_frames.max(frames);
+                        r.max_frame_list = r.max_frame_list.max(listed);
                     }
                 }
                 Err(e) => {
@@ -162,9 +179,14 @@ fn check_textures(a: &Assets, r: &mut Report) {
                 }
             }
         } else {
-            let res = jar.read(n).and_then(|b| decode_png(&b).map(|_| ()));
+            let res = jar
+                .read_png(n)
+                .and_then(|b| decode_png(&b).map(|i| i.width as u64 * i.height as u64));
             match res {
-                Ok(()) => r.textures.ok += 1,
+                Ok(px) => {
+                    r.textures.ok += 1;
+                    r.max_png_pixels = r.max_png_pixels.max(px);
+                }
                 Err(e) => {
                     r.textures.failed += 1;
                     r.fail("texture", short, e);
@@ -216,7 +238,7 @@ fn check_models(a: &Assets, r: &mut Report) {
                 .unwrap_or(&n)
                 .to_string();
             let ok = (|| -> Result<()> {
-                let text = jar.read_string(&n)?;
+                let text = jar.read_json(&n)?;
                 RawModel::parse(&text)?;
                 a.model(&id)?;
                 Ok(())
@@ -247,7 +269,9 @@ fn check_models(a: &Assets, r: &mut Report) {
     let mut referenced: BTreeSet<String> = BTreeSet::new();
     for n in a.block_names() {
         let Ok(bs) = a.blockstate(&n) else { continue };
-        let res = bake_all_variants(a, &bs, &mut r.quads, &mut referenced);
+        let mut inside = Vec::new();
+        let res = bake_all_variants(a, &bs, &mut r.quads, &mut referenced, &mut inside);
+        r.left_out_inside_models.extend(inside);
         match res {
             Ok(None) => r.blocks.ok += 1,
             Ok(Some(lo)) => {
@@ -280,9 +304,30 @@ fn check_models(a: &Assets, r: &mut Report) {
             }
         }
         match a.bake_item(&n) {
+            Ok(b) if !b.report.failed_parts.is_empty() => {
+                // one model of the item baked and another failed: the item is only half there
+                r.items.failed += 1;
+                for f in &b.report.failed_parts {
+                    r.fail("item part", &n, f);
+                }
+            }
             Ok(b) => {
                 r.items.ok += 1;
                 r.quads += b.quad_count() as u64;
+                r.max_item_quads = r.max_item_quads.max(b.quad_count());
+                if !b.parts.is_empty() && !b.report.dropped_parts.is_empty() {
+                    r.items_partial += 1;
+                }
+                r.left_out_inside_models.extend(
+                    b.report
+                        .notes
+                        .iter()
+                        .filter(|n| {
+                            !n.starts_with("a `special`")
+                                && (n.contains("was left out") || n.contains("were left out"))
+                        })
+                        .cloned(),
+                );
                 for q in b.quads() {
                     referenced.insert(q.texture.clone());
                 }
@@ -319,6 +364,7 @@ fn bake_all_variants(
     bs: &BlockState,
     quads: &mut u64,
     referenced: &mut BTreeSet<String>,
+    inside: &mut Vec<String>,
 ) -> Result<Option<LeftOut>> {
     let mut drawn = false;
     let mut first_left_out = None;
@@ -329,7 +375,7 @@ fn bake_all_variants(
             first_left_out.get_or_insert(lo);
             continue;
         }
-        let q = bake_model(
+        let (q, face_notes) = bake_model(
             &m,
             VariantRotation {
                 x: v.x,
@@ -337,6 +383,7 @@ fn bake_all_variants(
                 uvlock: v.uvlock,
             },
         )?;
+        inside.extend(face_notes);
         *quads += q.len() as u64;
         for quad in &q {
             referenced.insert(quad.texture.clone());

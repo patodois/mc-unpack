@@ -2,8 +2,10 @@
 //!
 //! A texture that has an `animation` section in its `.mcmeta` is a vertical (or tiled) sheet of
 //! frames. The model UVs (0 to 16) always refer to **one frame**, so a model draws a frame, not the
-//! sheet. [`Texture::frame`] cuts frame `i` of the sheet out; [`Texture::default_frame`] is frame 0.
-//! The order and duration in which the game plays them is in [`Animation::frames`].
+//! sheet. [`Texture::frame`] cuts frame `i` of the sheet out; [`Texture::default_frame`] is the first
+//! frame the animation shows.
+//! The order and duration in which the game plays them is in [`Animation::frames`]; the frame a
+//! model gets by default is the first of that list ([`Texture::default_frame`]).
 
 use std::io::Cursor;
 
@@ -109,10 +111,33 @@ impl Rgba {
     }
 }
 
+/// Most pixels a PNG may have: 2048 x 2048. The largest PNG under `textures/` in the eight jars
+/// the author has is 512 x 512 (a GUI image; block and item textures are 16 x 16 to 32 x 1024),
+/// so this is 16 times that. It is checked from the header, before any pixel is decoded.
+pub const MAX_PIXELS: u64 = 2048 * 2048;
+
+/// Most frames a texture sheet may hold. The largest animated sheet in the jars has far fewer
+/// (see `mc-unpack check`); this stops a 1 x 1 frame size on a big sheet from asking for millions.
+pub const MAX_SHEET_FRAMES: u32 = 4096;
+
+/// Most steps an animation's `frames` list may have
+pub const MAX_FRAME_LIST: usize = 4096;
+
 pub fn decode_png(bytes: &[u8]) -> Result<Rgba> {
     let mut dec = png::Decoder::new(Cursor::new(bytes));
     dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = dec.read_info()?;
+    {
+        let i = reader.info();
+        let px = i.width as u64 * i.height as u64;
+        if px == 0 || px > MAX_PIXELS {
+            bail!(
+                "PNG is {} x {} ({px} pixels); the limit is {MAX_PIXELS}",
+                i.width,
+                i.height
+            );
+        }
+    }
     let mut buf = vec![
         0;
         reader
@@ -208,9 +233,8 @@ pub struct RawAnimation {
 }
 
 impl McMeta {
-    pub fn parse(text: &str) -> Result<McMeta> {
-        let v: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
-            .context("the .mcmeta is not JSON")?;
+    pub fn parse(text: impl AsRef<[u8]>) -> Result<McMeta> {
+        let v: Value = crate::jar::parse_json(text.as_ref()).context("the .mcmeta is not JSON")?;
         let Some(a) = v.get("animation") else {
             return Ok(McMeta { animation: None });
         };
@@ -299,8 +323,17 @@ impl Texture {
             );
         }
         let count = (sheet.width / fw) * (sheet.height / fh);
+        if count > MAX_SHEET_FRAMES {
+            bail!("the sheet holds {count} frames; the limit is {MAX_SHEET_FRAMES}");
+        }
         let (frames, explicit) = match &a.frames {
             Some(list) => {
+                if list.len() > MAX_FRAME_LIST {
+                    bail!(
+                        "the animation lists {} frames; the limit is {MAX_FRAME_LIST}",
+                        list.len()
+                    );
+                }
                 let mut out = Vec::with_capacity(list.len());
                 for &(index, time) in list {
                     if index >= count {
@@ -358,9 +391,21 @@ impl Texture {
         ))
     }
 
-    /// Frame 0 of the sheet, which is what a model gets unless asked for another
+    /// The sheet frame the animation shows first: the first entry of the `.mcmeta` `frames` list
+    /// (which is not always frame 0: `fire_0` lists 16 first), else frame 0. This is what a model
+    /// gets unless asked for another frame.
+    pub fn default_frame_index(&self) -> u32 {
+        self.animation
+            .as_ref()
+            .and_then(|a| a.frames.first())
+            .map(|f| f.index)
+            .unwrap_or(0)
+    }
+
     pub fn default_frame(&self) -> Rgba {
-        self.frame(0).expect("a texture has frame 0")
+        // A frame in the list was checked against the sheet when the texture was built
+        self.frame(self.default_frame_index())
+            .unwrap_or_else(|_| self.sheet.crop(0, 0, self.frame_width, self.frame_height))
     }
 
     /// Every frame, in sheet order
@@ -464,5 +509,58 @@ mod tests {
         let img = decode_png(&png(3, 2, |x, y| [x as u8, y as u8, 9, 200])).unwrap();
         let again = decode_png(&encode_png(&img).unwrap()).unwrap();
         assert_eq!(img, again);
+    }
+
+    #[test]
+    fn a_png_over_the_pixel_limit_is_refused_from_its_header() {
+        // 2100 x 2100 is 4.41 million pixels; it is refused before the pixels are inflated
+        let mut out = Vec::new();
+        {
+            let mut enc = png::Encoder::new(&mut out, 2100, 2100);
+            enc.set_color(png::ColorType::Grayscale);
+            enc.set_depth(png::BitDepth::Eight);
+            let mut w = enc.write_header().unwrap();
+            w.write_image_data(&vec![0u8; 2100 * 2100]).unwrap();
+        }
+        let e = decode_png(&out).unwrap_err().to_string();
+        assert!(e.contains("limit"), "{e}");
+        assert!(
+            out.len() < 100_000,
+            "the file is small ({} bytes) and still refused",
+            out.len()
+        );
+    }
+
+    #[test]
+    fn the_default_frame_is_the_first_one_listed() {
+        let img = decode_png(&png(2, 4, |_, y| [y as u8, 0, 0, 255])).unwrap();
+        let meta = McMeta::parse(r#"{"animation":{"frames":[1,0]}}"#).unwrap();
+        let t = Texture::new(img, Some(&meta)).unwrap();
+        assert_eq!(t.default_frame_index(), 1);
+        assert_eq!(t.default_frame().pixel(0, 0), [2, 0, 0, 255]);
+        let plain =
+            Texture::new(decode_png(&png(2, 2, |_, _| [1, 1, 1, 255])).unwrap(), None).unwrap();
+        assert_eq!(plain.default_frame_index(), 0);
+    }
+
+    #[test]
+    fn frame_counts_are_bounded() {
+        // a 1 x 1 frame size on a 128 x 128 sheet asks for 16,384 frames
+        let img = decode_png(&png(128, 128, |_, _| [0, 0, 0, 255])).unwrap();
+        let meta = McMeta::parse(r#"{"animation":{"width":1,"height":1}}"#).unwrap();
+        assert!(Texture::new(img, Some(&meta))
+            .unwrap_err()
+            .to_string()
+            .contains("limit"));
+        let img = decode_png(&png(2, 2, |_, _| [0, 0, 0, 255])).unwrap();
+        let list = format!(
+            r#"{{"animation":{{"frames":[{}]}}}}"#,
+            vec!["0"; MAX_FRAME_LIST + 1].join(",")
+        );
+        let meta = McMeta::parse(list).unwrap();
+        assert!(Texture::new(img, Some(&meta))
+            .unwrap_err()
+            .to_string()
+            .contains("limit"));
     }
 }

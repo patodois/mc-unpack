@@ -478,3 +478,88 @@ fn provider_loads_everything_it_lists() {
         }
     }
 }
+
+#[test]
+fn an_animated_texture_defaults_to_the_first_frame_its_mcmeta_lists() {
+    // fire_0 lists frame 16 first, so frame 0 of the sheet is not what the game shows first
+    let a = jar!("26.3");
+    let t = a.texture("block/fire_0").unwrap();
+    let first = t.animation.as_ref().unwrap().frames[0].index;
+    assert_ne!(first, 0);
+    assert_eq!(t.default_frame_index(), first);
+    assert_eq!(t.default_frame(), t.frame(first).unwrap());
+    assert_ne!(t.default_frame(), t.frame(0).unwrap());
+}
+
+#[test]
+fn front_and_back_of_a_generated_item_agree_on_u() {
+    for v in ["1.21.1", "26.3"] {
+        let a = jar!(v);
+        let i = a.bake_item("diamond_sword").unwrap();
+        // at the left edge (x = 0) and the right edge (x = 1) of the slab, front and back sample
+        // the same u
+        for x in [0.0f32, 1.0] {
+            for face in [Dir::South, Dir::North] {
+                let q = i.quads().find(|q| q.face == face).unwrap();
+                let us: Vec<f32> = (0..4)
+                    .filter(|k| (q.pos[*k][0] - x).abs() < 1e-6)
+                    .map(|k| q.uv[k][0])
+                    .collect();
+                assert!(
+                    !us.is_empty() && us.iter().all(|u| (u - x).abs() < 1e-6),
+                    "{v} {face:?} x={x}: {us:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn multi_state_blocks_say_which_state_they_are() {
+    let a = jar!("26.3");
+    let b = a.bake_block("oak_stairs", &State::default()).unwrap();
+    assert_eq!(
+        b.report.state_used.as_deref(),
+        Some("facing=east,half=bottom,shape=inner_left")
+    );
+    assert!(
+        b.report.notes.iter().any(|n| n.contains("first of 40")),
+        "{:?}",
+        b.report.notes
+    );
+    assert_eq!(
+        a.default_state("oak_stairs").unwrap().as_deref(),
+        Some("facing=east,half=bottom,shape=inner_left")
+    );
+    // unknown properties only: the default, with them listed
+    let w = a
+        .bake_block("oak_stairs", &State::parse("waterlogged=true").unwrap())
+        .unwrap();
+    assert_eq!(w.report.ignored_properties, vec!["waterlogged"]);
+    assert!(!w.is_empty());
+    #[cfg(feature = "bridge")]
+    {
+        use mc_unpack::bridge::Minecraft;
+        use rewrite_bridge::Provider;
+        let mc = Minecraft::from_assets(jar!("26.3")).unwrap();
+        let m = mc.load("block/oak_stairs").unwrap();
+        assert_eq!(
+            m.name,
+            "block/oak_stairs?variant=facing=east,half=bottom,shape=inner_left"
+        );
+        let l = mc.list("oak_stairs").unwrap();
+        assert!(l.iter().any(|i| i.id == "block/oak_stairs"
+            && i.name
+                .contains("[facing=east,half=bottom,shape=inner_left]")));
+    }
+}
+
+#[test]
+fn the_sweep_stays_far_below_the_safety_limits() {
+    // the sweep keeps its memory: the biggest thing met stays far below the safety limits
+    let a = jar!("26.3");
+    let r = check::run(&a).unwrap();
+    assert!(r.max_png_pixels * 8 <= mc_unpack::texture::MAX_PIXELS);
+    assert!((r.max_sheet_frames as usize) * 8 <= mc_unpack::texture::MAX_SHEET_FRAMES as usize);
+    assert!(r.max_item_quads * 4 <= mc_unpack::item::MAX_LAYER_ELEMENTS * 2);
+}

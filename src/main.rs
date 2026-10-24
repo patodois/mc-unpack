@@ -56,9 +56,9 @@ enum Cmd {
         /// Output folder
         #[arg(short, long, default_value = "out")]
         out: PathBuf,
-        /// Frame of animated textures (0 is the first frame of the sheet)
-        #[arg(long, default_value_t = 0)]
-        frame: u32,
+        /// Sheet frame of animated textures (default: the first frame the animation shows)
+        #[arg(long)]
+        frame: Option<u32>,
         /// Colour for a tint index, repeatable: `0=#7bb34a`, `0=grass:0.8,0.4`, `0=foliage@plains`
         #[arg(long = "tint", value_name = "INDEX=COLOUR")]
         tints: Vec<String>,
@@ -69,6 +69,8 @@ enum Cmd {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Say what an id bakes to: the state used, what was ignored, every note, and what was left out
+    Inspect { id: String },
     /// Write a texture (and with `--frames` every frame of an animated one) as PNG
     Texture {
         /// Path under textures/, such as `block/stone`
@@ -110,9 +112,22 @@ enum Cmd {
 }
 
 fn tilde(p: &Path) -> String {
-    let s = p.display().to_string();
     match std::env::var("HOME") {
-        Ok(h) if !h.is_empty() && s.starts_with(&h) => format!("~{}", &s[h.len()..]),
+        Ok(h) => tilde_with(p, &h),
+        _ => p.display().to_string(),
+    }
+}
+
+/// `~` for the home folder only at a path boundary: `/home/ann2/x` is not under `/home/ann`
+fn tilde_with(p: &Path, home: &str) -> String {
+    let s = p.display().to_string();
+    let h = home.trim_end_matches('/');
+    if h.is_empty() {
+        return s;
+    }
+    match s.strip_prefix(h) {
+        Some("") => "~".to_string(),
+        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
         _ => s,
     }
 }
@@ -257,9 +272,18 @@ fn cmd_list(
 
 fn print_states(a: &Assets, name: &str) -> Result<()> {
     let bs = a.blockstate(name)?;
+    let default = a.default_state(name)?;
     if !bs.variants.is_empty() {
         for k in bs.keys() {
-            println!("    {}", if k.is_empty() { "(no properties)" } else { k });
+            let mark = if default.as_deref() == Some(k) {
+                "   <- what `block/<name>` with no state builds"
+            } else {
+                ""
+            };
+            println!(
+                "    {}{mark}",
+                if k.is_empty() { "(no properties)" } else { k }
+            );
         }
     } else {
         for (p, vs) in bs.property_values() {
@@ -267,6 +291,9 @@ fn print_states(a: &Assets, name: &str) -> Result<()> {
                 "    {p}: {}",
                 vs.into_iter().collect::<Vec<_>>().join(" | ")
             );
+        }
+        if let Some(d) = default {
+            println!("    with no state, `block/<name>` builds `{d}`");
         }
     }
     Ok(())
@@ -324,7 +351,7 @@ fn cmd_model(
     a: Assets,
     id: String,
     out: PathBuf,
-    frame: u32,
+    frame: Option<u32>,
     tints: Vec<String>,
     corner_origin: bool,
     name: Option<String>,
@@ -377,6 +404,46 @@ fn cmd_model(
     Ok(())
 }
 
+fn cmd_inspect(a: Assets, id: String) -> Result<()> {
+    let b = a.bake_id(&id)?;
+    let r = &b.report;
+    println!("{id}");
+    println!("  quads: {}, parts: {}", b.quad_count(), b.parts.len());
+    match &r.state_used {
+        Some(s) => println!("  state used: {s}"),
+        None => println!("  state used: (none: the file has no properties to choose)"),
+    }
+    if r.candidates > 1 {
+        println!(
+            "  fits {} entries of the blockstate; the first was used",
+            r.candidates
+        );
+    }
+    if !r.ignored_properties.is_empty() {
+        println!("  ignored properties: {}", r.ignored_properties.join(", "));
+    }
+    for t in b.texture_paths() {
+        println!("  texture: {t}");
+    }
+    let tints: Vec<String> = b.tint_indices().iter().map(|i| i.to_string()).collect();
+    if !tints.is_empty() {
+        println!("  tintindex used: {}", tints.join(", "));
+    }
+    for n in &r.notes {
+        println!("  note: {n}");
+    }
+    for f in &r.failed_parts {
+        println!("  FAILED part: {f}");
+    }
+    for d in &r.dropped_parts {
+        println!("  left-out part: {d}");
+    }
+    if let Some(lo) = &r.left_out {
+        println!("  LEFT OUT: {lo}");
+    }
+    Ok(())
+}
+
 fn cmd_texture(a: Assets, path: String, out: PathBuf, frames: bool) -> Result<()> {
     let t = a.texture(&path)?;
     std::fs::create_dir_all(&out)?;
@@ -403,7 +470,11 @@ fn cmd_texture(a: Assets, path: String, out: PathBuf, frames: bool) -> Result<()
     } else {
         let p = out.join(format!("{base}.png"));
         std::fs::write(&p, encode_png(&t.default_frame())?)?;
-        println!("wrote frame 0 to {}", tilde(&p));
+        println!(
+            "wrote frame {} (the first the animation shows) to {}",
+            t.default_frame_index(),
+            tilde(&p)
+        );
     }
     Ok(())
 }
@@ -489,6 +560,12 @@ fn cmd_check(cli: &Cli, verbose: bool) -> Result<bool> {
                     println!("   blocks baked  {}", fmt_count(r.blocks));
                     println!("   items baked   {}", fmt_count(r.items));
                     println!("   quads         {}", r.quads);
+                    if r.items_partial > 0 {
+                        println!(
+                            "   items that lost a part to code or a refusal: {}",
+                            r.items_partial
+                        );
+                    }
                     for (why, ids) in &r.blocks_left_out {
                         println!("   blocks left out ({}): {}", ids.len(), why);
                         if verbose {
@@ -505,9 +582,30 @@ fn cmd_check(cli: &Cli, verbose: bool) -> Result<bool> {
                 for f in &r.failures {
                     println!("   FAIL {f}");
                 }
+                if !r.left_out_inside_models.is_empty() {
+                    println!(
+                        "   faces or elements left out inside models: {}",
+                        r.left_out_inside_models.len()
+                    );
+                    if verbose {
+                        for n in &r.left_out_inside_models {
+                            println!("      {n}");
+                        }
+                    }
+                }
                 for f in &r.upstream_defects {
                     println!("   upstream defect (not a failure): {f}");
                 }
+                println!(
+                    "   biggest met (limits): png {} px ({}), sheet frames {} ({}), frame list {} ({}), item quads {}",
+                    r.max_png_pixels,
+                    mc_unpack::texture::MAX_PIXELS,
+                    r.max_sheet_frames,
+                    mc_unpack::texture::MAX_SHEET_FRAMES,
+                    r.max_frame_list,
+                    mc_unpack::texture::MAX_FRAME_LIST,
+                    r.max_item_quads
+                );
                 println!("   failures: {}  ({:.1} s)", r.total_failed(), r.seconds);
                 total_failed += r.total_failed();
             }
@@ -630,6 +728,7 @@ fn main() {
             )
             .map(|_| true)
         }
+        Cmd::Inspect { id } => cmd_inspect(one_assets(&cli)?, id.clone()).map(|_| true),
         Cmd::Texture { path, out, frames } => {
             cmd_texture(one_assets(&cli)?, path.clone(), out.clone(), *frames).map(|_| true)
         }
@@ -662,5 +761,20 @@ fn main() {
             eprintln!("error: {e:#}");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tilde_respects_the_path_boundary() {
+        let t = |p: &str| tilde_with(Path::new(p), "/home/ann");
+        assert_eq!(t("/home/ann"), "~");
+        assert_eq!(t("/home/ann/x/y.jar"), "~/x/y.jar");
+        assert_eq!(t("/home/ann2/x"), "/home/ann2/x");
+        assert_eq!(t("/srv/home/ann/x"), "/srv/home/ann/x");
+        assert_eq!(tilde_with(Path::new("/x"), "/"), "/x");
     }
 }

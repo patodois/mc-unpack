@@ -23,7 +23,7 @@
 
 use anyhow::{bail, Result};
 
-use crate::model::{Axis, Dir, Element, ElementRotation, Face, ResolvedModel};
+use crate::model::{Axis, Dir, Element, ElementRotation, ResolvedModel};
 
 /// A quad in blocks, counter-clockwise from outside
 #[derive(Clone, Debug, PartialEq)]
@@ -206,8 +206,32 @@ fn unplane_uv(d: Dir, uv: [f64; 2]) -> V3 {
     }
 }
 
-fn element_matrix(r: &ElementRotation) -> (V3, M3, V3) {
-    match r {
+/// `Rx * Ry * Rz`. The order is not in the data, only in the game's code, and the data cannot prove
+/// it: the two Euler rotations in the jars (`template_hanging_sign_rot_*`: x 180, y -67.5, z -180)
+/// come out the same for `Rx * Ry * Rz` and for `Rz * Ry * Rx`, which is all that can be said. So a
+/// rotation for which those two differ is refused, and the others are exact under either.
+fn euler_matrix(x: f64, y: f64, z: f64) -> Result<M3> {
+    let (rx, ry, rz) = (
+        rot_axis(Axis::X, x),
+        rot_axis(Axis::Y, y),
+        rot_axis(Axis::Z, z),
+    );
+    let xyz = mul(&mul(&rx, &ry), &rz);
+    let zyx = mul(&mul(&rz, &ry), &rx);
+    let diff = (0..3)
+        .flat_map(|i| (0..3).map(move |j| (i, j)))
+        .map(|(i, j)| (xyz[i][j] - zyx[i][j]).abs())
+        .fold(0.0, f64::max);
+    if diff > 1e-9 {
+        bail!(
+            "Euler rotation x {x}, y {y}, z {z}: the order of the three turns is in the game's code, not in the data, and the two likely orders disagree here"
+        );
+    }
+    Ok(xyz)
+}
+
+fn element_matrix(r: &ElementRotation) -> Result<(V3, M3, V3)> {
+    Ok(match r {
         ElementRotation::Axis {
             origin,
             axis,
@@ -216,7 +240,11 @@ fn element_matrix(r: &ElementRotation) -> (V3, M3, V3) {
         } => {
             let m = rot_axis(*axis, *angle);
             let k = if *rescale {
-                1.0 / angle.to_radians().cos().abs().max(1e-9)
+                let c = angle.to_radians().cos().abs();
+                if c < 0.5 {
+                    bail!("rescale with a {angle} degree turn is not defined (the game accepts -45 to 45)");
+                }
+                1.0 / c
             } else {
                 1.0
             };
@@ -228,13 +256,9 @@ fn element_matrix(r: &ElementRotation) -> (V3, M3, V3) {
             (*origin, m, scale)
         }
         ElementRotation::Euler { origin, x, y, z } => {
-            let m = mul(
-                &mul(&rot_axis(Axis::X, *x), &rot_axis(Axis::Y, *y)),
-                &rot_axis(Axis::Z, *z),
-            );
-            (*origin, m, [1.0; 3])
+            (*origin, euler_matrix(*x, *y, *z)?, [1.0; 3])
         }
-    }
+    })
 }
 
 fn snap(v: f64) -> f32 {
@@ -242,18 +266,44 @@ fn snap(v: f64) -> f32 {
 }
 
 /// Bakes one element into up to six quads. `resolve_tex` maps a face's texture reference to its
-/// path and translucency.
+/// path and translucency. A face whose reference cannot be resolved (`#name` that nothing defines)
+/// is left out and a line saying so goes to `notes`: the game draws its built-in missing-texture
+/// pattern there, which is code, not data.
 pub fn bake_element(
     el: &Element,
     rot: VariantRotation,
     resolve_tex: &mut dyn FnMut(&str) -> Result<(String, bool)>,
     out: &mut Vec<Quad>,
+    notes: &mut Vec<String>,
 ) -> Result<()> {
+    if rot.x % 90 != 0 || rot.y % 90 != 0 {
+        bail!(
+            "variant rotation x {} y {}: only quarter turns exist",
+            rot.x,
+            rot.y
+        );
+    }
     let vm = variant_matrix(rot.x, rot.y);
-    let identity_variant = rot.x == 0 && rot.y == 0;
-    let erot = el.rotation.as_ref().map(element_matrix);
+    let identity_variant = rot.x.rem_euclid(360) == 0 && rot.y.rem_euclid(360) == 0;
+    let erot = match el.rotation.as_ref().map(element_matrix).transpose() {
+        Ok(r) => r,
+        Err(e) => {
+            // the element is left out, the rest of the model is still good
+            notes.push(format!("an element was left out: {e:#}"));
+            return Ok(());
+        }
+    };
     for (dir, face) in &el.faces {
-        let (tex, translucent) = resolve_tex(&face.texture)?;
+        let (tex, translucent) = match resolve_tex(&face.texture) {
+            Ok(t) => t,
+            Err(e) => {
+                notes.push(format!(
+                    "the {} face was left out: {e:#} (the game draws its built-in missing-texture pattern)",
+                    dir.name()
+                ));
+                continue;
+            }
+        };
         let corner_pos = corners_of(*dir).map(|c| {
             [
                 if c[0] { el.to[0] } else { el.from[0] },
@@ -289,7 +339,7 @@ pub fn bake_element(
         }
         // UV per corner
         let rect = face.uv.unwrap_or_else(|| default_uv(*dir, el.from, el.to));
-        let shift = (face.rotation / 90) as usize;
+        let shift = (face.rotation.rem_euclid(360) / 90) as usize;
         let rc = [
             [rect[0], rect[1]],
             [rect[0], rect[3]],
@@ -302,7 +352,7 @@ pub fn bake_element(
         }
         if rot.uvlock && !identity_variant {
             // Where did this face's direction end up (rounded to a whole axis)?
-            let nd = variant_dir(&vm, *dir);
+            let nd = variant_dir(&vm, *dir)?;
             for u in uv.iter_mut() {
                 let on_plane = unplane_uv(*dir, *u);
                 let r = apply(
@@ -330,7 +380,7 @@ pub fn bake_element(
         if area < 1e-9 {
             continue;
         }
-        let cull = face.cullface.map(|d| variant_dir(&vm, d));
+        let cull = face.cullface.map(|d| variant_dir(&vm, d)).transpose()?;
         out.push(Quad {
             pos: pos.map(|p| [snap(p[0] / 16.0), snap(p[1] / 16.0), snap(p[2] / 16.0)]),
             normal: [snap(normal[0]), snap(normal[1]), snap(normal[2])],
@@ -373,19 +423,21 @@ fn cross(a: V3, b: V3) -> V3 {
 }
 
 /// A direction after a block rotation (whole axes only)
-fn variant_dir(vm: &M3, d: Dir) -> Dir {
+fn variant_dir(vm: &M3, d: Dir) -> Result<Dir> {
     let r = apply(vm, apply_i(d));
     Dir::from_normal([
         r[0].round() as i32,
         r[1].round() as i32,
         r[2].round() as i32,
     ])
-    .expect("a quarter turn keeps axes")
+    .ok_or_else(|| anyhow::anyhow!("the variant rotation does not keep the axes"))
 }
 
-/// Bakes every element of a resolved model
-pub fn bake_model(model: &ResolvedModel, rot: VariantRotation) -> Result<Vec<Quad>> {
+/// Bakes every element of a resolved model. The second value lists what was left out and why (a
+/// face whose texture reference cannot be resolved, an element whose rotation is ambiguous).
+pub fn bake_model(model: &ResolvedModel, rot: VariantRotation) -> Result<(Vec<Quad>, Vec<String>)> {
     let mut out = Vec::new();
+    let mut notes = Vec::new();
     for (i, el) in model.elements.iter().enumerate() {
         bake_element(
             el,
@@ -395,23 +447,20 @@ pub fn bake_model(model: &ResolvedModel, rot: VariantRotation) -> Result<Vec<Qua
                 Ok((t.path, t.translucent))
             },
             &mut out,
+            &mut notes,
         )
         .map_err(|e| e.context(format!("{} element {i}", model.id)))?;
     }
-    Ok(out)
-}
-
-/// Checks a face has a texture reference that can be followed (used by the sweep)
-pub fn check_face(model: &ResolvedModel, face: &Face) -> Result<()> {
-    if face.texture.is_empty() {
-        bail!("empty texture reference");
+    for n in notes.iter_mut() {
+        *n = format!("{}: {n}", model.id);
     }
-    model.texture(&face.texture).map(|_| ())
+    Ok((out, notes))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::Face;
 
     fn el(
         from: V3,
@@ -445,7 +494,16 @@ mod tests {
 
     fn bake(e: &Element, rot: VariantRotation) -> Vec<Quad> {
         let mut out = Vec::new();
-        bake_element(e, rot, &mut |_| Ok(("t".into(), false)), &mut out).unwrap();
+        let mut notes = Vec::new();
+        bake_element(
+            e,
+            rot,
+            &mut |_| Ok(("t".into(), false)),
+            &mut out,
+            &mut notes,
+        )
+        .unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
         out
     }
 
@@ -874,10 +932,126 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_texture_is_an_error() {
-        let e = el([0.0; 3], [16.0; 3], None, &[(Dir::Up, None, 0)]);
+    fn an_unresolved_texture_leaves_that_face_out_with_a_note() {
+        let e = el(
+            [0.0; 3],
+            [16.0; 3],
+            None,
+            &[(Dir::Up, None, 0), (Dir::Down, None, 0)],
+        );
         let mut out = Vec::new();
-        let r = bake_element(&e, NONE, &mut |_| bail!("no such texture"), &mut out);
+        let mut notes = Vec::new();
+        let mut n = 0;
+        bake_element(
+            &e,
+            NONE,
+            &mut |_| {
+                n += 1;
+                if n == 1 {
+                    bail!("texture variable #x is not defined")
+                } else {
+                    Ok(("t".into(), false))
+                }
+            },
+            &mut out,
+            &mut notes,
+        )
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].face, Dir::Down);
+        assert_eq!(notes.len(), 1);
+        assert!(
+            notes[0].contains("up face") && notes[0].contains("#x"),
+            "{notes:?}"
+        );
+    }
+
+    fn euler_el(x: f64, y: f64, z: f64) -> Element {
+        el(
+            [0.0; 3],
+            [16.0; 3],
+            Some(ElementRotation::Euler {
+                origin: [8.0; 3],
+                x,
+                y,
+                z,
+            }),
+            &[(Dir::Up, None, 0)],
+        )
+    }
+
+    #[test]
+    fn a_mixed_euler_rotation_whose_order_matters_is_left_out_with_a_note() {
+        let mut out = Vec::new();
+        let mut notes = Vec::new();
+        bake_element(
+            &euler_el(30.0, 40.0, 50.0),
+            NONE,
+            &mut |_| Ok(("t".into(), false)),
+            &mut out,
+            &mut notes,
+        )
+        .unwrap();
+        assert!(out.is_empty());
+        assert!(notes[0].contains("order"), "{notes:?}");
+        // a single axis, and the hanging-sign combination of the real data (both orders agree), are kept
+        for e in [euler_el(0.0, 33.0, 0.0), euler_el(180.0, -67.5, -180.0)] {
+            let (mut out, mut notes) = (Vec::new(), Vec::new());
+            bake_element(
+                &e,
+                NONE,
+                &mut |_| Ok(("t".into(), false)),
+                &mut out,
+                &mut notes,
+            )
+            .unwrap();
+            assert_eq!(out.len(), 1, "{notes:?}");
+        }
+    }
+
+    #[test]
+    fn rescale_beyond_45_degrees_leaves_the_element_out_not_a_huge_scale() {
+        let e = el(
+            [0.0; 3],
+            [16.0; 3],
+            Some(ElementRotation::Axis {
+                origin: [8.0; 3],
+                axis: Axis::Y,
+                angle: 89.9,
+                rescale: true,
+            }),
+            &[(Dir::Up, None, 0)],
+        );
+        let (mut out, mut notes) = (Vec::new(), Vec::new());
+        bake_element(
+            &e,
+            NONE,
+            &mut |_| Ok(("t".into(), false)),
+            &mut out,
+            &mut notes,
+        )
+        .unwrap();
+        assert!(out.is_empty(), "{:?}", out);
+        assert!(notes[0].contains("rescale"), "{notes:?}");
+    }
+
+    #[test]
+    fn odd_public_input_is_an_error_not_a_panic() {
+        let e = el([0.0; 3], [16.0; 3], None, &[(Dir::Up, None, -90)]);
+        // a negative face rotation is read as 270
+        assert_eq!(bake(&e, NONE)[0].uv[0], [1.0, 0.0]);
+        let (mut out, mut notes) = (Vec::new(), Vec::new());
+        let r = bake_element(
+            &e,
+            VariantRotation {
+                x: 45,
+                y: 0,
+                uvlock: true,
+            },
+            &mut |_| Ok(("t".into(), false)),
+            &mut out,
+            &mut notes,
+        );
         assert!(r.is_err());
     }
 }

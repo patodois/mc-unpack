@@ -165,8 +165,9 @@ pub struct Biome {
 }
 
 impl Biome {
-    pub fn parse(name: &str, text: &str) -> Result<Biome> {
-        let v: Value = serde_json::from_str(text).with_context(|| format!("biome {name}"))?;
+    pub fn parse(name: &str, text: impl AsRef<[u8]>) -> Result<Biome> {
+        let v: Value =
+            crate::jar::parse_json(text.as_ref()).with_context(|| format!("biome {name}"))?;
         let temperature = v
             .get("temperature")
             .and_then(|n| n.as_f64())
