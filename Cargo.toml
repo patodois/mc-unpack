@@ -1,0 +1,37 @@
+[package]
+name = "mc-unpack"
+version = "0.1.0"
+edition = "2021"
+description = "Reader for the block and item models and textures in your own Minecraft Java Edition client jar, with a rewrite-bridge provider (unofficial, for Minecraft)"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["minecraft", "models", "gltf", "rewrite", "assets"]
+categories = ["game-development", "parser-implementations"]
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+png = "0.18.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+# The client jar is a zip of 5,000 to 15,000 entries (most of them classes). The crate reads the
+# central directory once and then seeks to single entries: the jar is never extracted.
+zip = { version = "8", default-features = false, features = ["deflate"] }
+# The bridge to other game rewrites (see src/bridge.rs, github.com/patodois/rewrite-bridge)
+rewrite-bridge = { version = "0.2.1", optional = true }
+
+# The peak memory report of `check`
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[features]
+default = ["bridge"]
+# `Provider` for Minecraft, and the CLI commands that use it
+bridge = ["dep:rewrite-bridge"]
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 3
+debug = false
