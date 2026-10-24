@@ -400,26 +400,30 @@ content and are not in this repository.
 
 ## Legal
 
-This repository publishes only code that reads files you already have: no Mojang code, no game files, textures, models or
-renders are included, and the tests build their own tiny jars. `mc-unpack` reads resource files (JSON and PNG) only; it never
-reads, decompiles or runs the `.class` files in the jar. What the official documents say, as read by this author for the
-minecraft-link project on 2026-10-23 at minecraft.net (summarised, not legal advice; the pages could not be fetched again
-while this was written, so read them yourself):
+This repository publishes only code that reads files you already have. It contains no Mojang code and no game files,
+textures, models or renders; the tests build their own tiny jars. `mc-unpack` reads resource files (JSON and PNG) only. It
+never reads, decompiles or runs the `.class` files in the jar, and it does not modify the game or your install.
 
-- [Minecraft End User License Agreement](https://www.minecraft.net/en-us/eula) and
-  [Usage Guidelines](https://www.minecraft.net/en-us/usage-guidelines).
-- A **mod** is something original that does not contain a substantial part of Mojang's copyrightable code or content; you own
-  what you create and may share it as long as you do not sell it or try to make money from it, and **do not distribute a
-  modded version of the game**. The guidelines add: a product that mentions Minecraft must say that it is not official (the
-  line at the top of this page) and must not use the Minecraft name as its primary or dominant name, which is why this crate is
-  called `mc-unpack` and says "for Minecraft" in its description. No Minecraft assets, models, textures or renders are
-  distributed here, and the exported glTF and PNG files you make are Mojang's content: keep them to yourself or follow the
-  guidelines before sharing them.
-- Mojang may change the guidelines at any time and may take down projects that break them.
+What the official documents say, as read at minecraft.net on 2026-10-24 (a summary, not legal advice; read them yourself,
+they change):
 
-This tool only reads a jar on your own disk and writes files to a folder you name; it sends nothing anywhere. The author is
-not affiliated with Mojang or Microsoft and does not claim the legality of reading your own install for any purpose you have
-in mind: that is yours to check.
+- The [Minecraft EULA](https://www.minecraft.net/en-us/eula) allows developing tools, plug-ins and services as long as they
+  do not seem official or approved by Mojang. It counts tools among "Mods": something original that does not contain a
+  substantial part of Mojang's code or content. You own what you create, and you may not sell it or try to make money from
+  it, distribute the game or a modded version of it, or distribute anything Mojang made.
+- The [Usage Guidelines](https://www.minecraft.net/en-us/usage-guidelines) add that a project that uses the Minecraft name
+  must say prominently that it is not official (the line at the top of this page), must make clear who is responsible for it
+  and how to reach them, and may use the name only in a secondary title or description, never as the primary or dominant
+  name. That is why this crate is called `mc-unpack` and says "for Minecraft" in its description.
+- A single block, its textures and its look belong to Mojang. The glTF and PNG files you export are Mojang's content: keep
+  them for yourself. The guidelines treat sharing them with others as commercial use even when it is free, so follow the
+  guidelines before you share any.
+- Mojang may change the guidelines or withdraw them at any time, and may take down software that breaks them.
+
+This tool only reads a jar on your own disk and writes files to a folder you name; it sends nothing anywhere. It is made
+and maintained by [patodois](https://github.com/patodois), who is responsible for it; reach them through this repository's
+[issues](https://github.com/patodois/mc-unpack/issues). The author is not affiliated with Mojang or Microsoft and does not
+claim the legality of reading your own install for any purpose you have in mind: that is yours to check.
 
 ## Licence
 
