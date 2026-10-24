@@ -1,0 +1,9 @@
+{
+  "name": "mc-unpack-render",
+  "private": true,
+  "description": "Headless renders of exported glTF files (three.js + Playwright), used to check the exporter by eye",
+  "dependencies": {
+    "playwright-core": "^1.61.1",
+    "three": "^0.160.0"
+  }
+}

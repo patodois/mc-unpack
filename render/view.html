@@ -1,0 +1,92 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>mc-unpack glTF view</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}
+#refs{position:fixed;right:8px;top:8px;display:flex;flex-direction:column;gap:6px;align-items:flex-end;font:11px monospace;color:#fff}
+#refs div{background:#0008;padding:2px 4px}
+#refs img{image-rendering:pixelated;display:block;width:96px;height:auto;border:1px solid #fff8;background:#444}</style>
+<script type="importmap">
+{ "imports": { "three": "/node_modules/three/build/three.module.js", "three/addons/": "/node_modules/three/examples/jsm/" } }
+</script></head><body>
+<div id="refs"></div>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+const q = new URLSearchParams(location.search);
+const num = (k, d) => q.has(k) ? Number(q.get(k)) : d;
+const vec = (k, d) => (q.get(k) ? q.get(k).split(',').map(Number) : d);
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(Number('0x' + (q.get('bg') || '9db4c8')));
+scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8f99, num('hemi', 1.6)));
+const sun = new THREE.DirectionalLight(0xffffff, num('sun', 1.4)); sun.position.set(...vec('sunpos', [3, 6, 4])); scene.add(sun);
+const camera = new THREE.PerspectiveCamera(num('fov', 35), innerWidth / innerHeight, 0.05, 4000);
+camera.position.set(...vec('pos', [2, 1.5, 3])); camera.lookAt(...vec('tgt', [0, 0.9, 0]));
+if (q.get('refs')) {
+  const box = document.getElementById('refs');
+  for (const item of q.get('refs').split(',').filter(Boolean)) {
+    const [i, name] = item.split(':');
+    const d = document.createElement('div');
+    d.textContent = name.replace(/\.png$/, '');
+    const im = document.createElement('img'); im.src = '/r/' + i;
+    d.appendChild(im); box.appendChild(d);
+  }
+}
+// The game shades faces by their direction; the glTF itself carries no such thing, so this is
+// viewer styling only (look=mc)
+function mcShade(root) {
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+    const g = o.geometry, n = g.attributes.normal, p = g.attributes.position;
+    const col = new Float32Array(p.count * 3);
+    const c = new THREE.Color();
+    for (let i = 0; i < p.count; i++) {
+      const v = new THREE.Vector3(n.getX(i), n.getY(i), n.getZ(i)).transformDirection(o.matrixWorld);
+      const ay = Math.abs(v.y), ax = Math.abs(v.x), az = Math.abs(v.z);
+      const s = ay >= ax && ay >= az ? (v.y > 0 ? 1.0 : 0.5) : (az >= ax ? 0.8 : 0.6);
+      c.setRGB(s, s, s, THREE.SRGBColorSpace);
+      col.set([c.r, c.g, c.b], i * 3);
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    const m = o.material;
+    o.material = new THREE.MeshBasicMaterial({
+      map: m.map, vertexColors: true,
+      alphaTest: m.alphaTest || 0, transparent: m.transparent, side: THREE.FrontSide,
+    });
+  });
+}
+new GLTFLoader().load(q.get('m'), (gltf) => {
+  const root = gltf.scene;
+  let tris = 0;
+  root.traverse((o) => { if (o.isMesh) tris += (o.geometry.index ? o.geometry.index.count : o.geometry.attributes.position.count) / 3; });
+  root.updateMatrixWorld(true);
+  if (q.get('look') === 'mc') mcShade(root);
+  scene.add(root);
+  const names = gltf.animations.map((a) => a.name + ':' + a.duration.toFixed(3));
+  let used = null;
+  if (q.has('anim')) {
+    const clip = gltf.animations.find((a) => a.name === q.get('anim'));
+    if (clip) {
+      const mixer = new THREE.AnimationMixer(root);
+      mixer.clipAction(clip).play();
+      const t = q.has('frac') ? num('frac', 0) * clip.duration : num('t', 0);
+      mixer.setTime(t);
+      used = { clip: clip.name, t, duration: clip.duration };
+    }
+  }
+  root.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(root);
+  window.result = { tris, nanim: names.length, used, box: [box.min.toArray(), box.max.toArray()], anims: q.has('list') ? names : undefined };
+  if (q.has('fit')) {
+    const c = box.getCenter(new THREE.Vector3()), s = box.getSize(new THREE.Vector3());
+    const r = Math.max(s.x, s.y, s.z) * num('fit', 1.4);
+    const dir = new THREE.Vector3(...vec('dir', [0.6, 0.35, 1])).normalize();
+    camera.position.copy(c).addScaledVector(dir, r * 1.8);
+    camera.lookAt(c);
+  }
+  renderer.render(scene, camera);
+  setTimeout(() => { renderer.render(scene, camera); window.done = true; }, 300);
+}, undefined, (err) => { window.result = { error: String(err) }; window.done = true; });
+</script></body></html>
