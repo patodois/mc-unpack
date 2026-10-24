@@ -44,7 +44,7 @@ its data, is left out and listed under [What is left out](#what-is-left-out).
   `MC_UNPACK_PRISM_DIR` and `MC_UNPACK_MINECRAFT_DIR` replace the two launcher folders. Only the macOS Prism layout has been
   tried by the author; the other paths are the launchers' documented defaults. A modded profile's jar (Fabric, Forge) holds no
   assets and is refused with that message.
-- **Rust**, stable (edition 2021; written with 1.99). A release build takes about 10 seconds with `-j 4`, plus the download of
+- **Rust**, stable (edition 2021; written with 1.99; 1.88, the version `Cargo.toml` asks for, was checked with and without the `bridge` feature, and CI repeats that). A release build takes about 10 seconds with `-j 4`, plus the download of
   the dependencies.
 - **Disk and memory.** The jar is never extracted: the zip directory (5,000 to 15,000 entries, most of them classes) is read
   once and single entries are inflated on demand. `check` over eight jars peaks at about 90 MB.
@@ -126,7 +126,7 @@ the first entry that fits. Where this is visible:
   block with several states (the `id` stays `block/oak_stairs`). `Minecraft::load_report` returns the full notes.
 
 **Time and memory** (release build, 16 GB Apple silicon Mac, 23 to 24 October 2026): `check` over all eight jars takes 1.3 s
-and peaks at 86 MB; `check-bridge` 0.1 s per jar; `check-conformance` on 26.3 (2,784 assets) a few seconds.
+and peaks at 86 MB; `check-bridge` 0.1 s per jar; `check-conformance` on 26.3 (2,786 assets) 0.5 s and 60 MB.
 
 ## Formats as decoded
 
@@ -171,27 +171,35 @@ In short:
   the texture is not animated at all (it is the sheet's first frame, whatever the one listed frame was).
 - **What the format defaults, and what is required.** Read as the format defines them, not as this crate guesses: `weight` 1,
   `uvlock` false, `x`/`y`/`z` 0, element `shade` true, face `rotation` 0 (read modulo 360, so 360 and -90 are fine), no
-  `cullface` (a name the game does not know is none), no `tintindex`, a rotation's `rescale` false, each missing Euler angle 0,
+  `cullface` (a name the game does not know is none; this reading, and the face `rotation` modulo 360, are 26.x's: 1.12.2 refuses
+  a model whose face rotation is not 0, 90, 180 or 270, so `-90` and `360` load here and would not there), no `tintindex`, a rotation's `rescale` false, each missing Euler angle 0,
   `frametime` 1 and `interpolate` false in a `.mcmeta`. A model with an `elements` key whose list is empty replaces its parent's
-  elements in 26.x and **inherits them** in 1.8 to 1.12. Required, as in the game (an error where they are missing): a rotation's `origin`, an
+  elements in 26.x and **inherits them** in 1.8 to 1.12 (read in 1.12.2) and, here, in 1.13 to 1.21.3 too (unconfirmed: those jars were
+  not read, and this follows the older rule for want of knowing). Required, as in the game (an error where they are missing): a rotation's `origin`, an
   element's `faces` (at least one), and, for this crate, the `temperature` and `downfall` of a `grass` item tint (the game's
   own default is in code: without them the tint is left uncoloured, with a note). `from` and `to` must lie in -16 to 32, every number must be
   finite, `light_emission` is 0 to 15; a face `rotation`, `tintindex` or a `.mcmeta` number written `90.0` is read as 90, anything that is not a
   whole number or is out of range is an error, never a silent 0 or a truncation (the game truncates a fraction; this crate
   refuses it).
 - **Generated items.** Only `layer0` to `layer4`, in order, stopping at the first one that is missing or does not resolve
-  (a gap ends the list; `layer5` is not read). Each layer: a front and a back face over the whole square at z 7.5 to 8.5, and
-  one strip **per pixel edge** where an opaque pixel (alpha above 0 in some frame) meets a transparent one or the border,
-  not merged into runs, each strip's UV its pixel shrunk by 0.1 texel on every side so that filtering does not bleed (the
-  back face's u runs the other way, `[16 0 0 16]`, so that it samples the same texel as the front at the same x). **Left out:**
-  the game names the left and right strips with the opposite direction (east for a strip on the west edge) and draws them
-  without culling; this crate gives them the outward direction, which changes only their shading and makes them visible to
-  a viewer that culls back faces. **Opacity is the union over the frames** of an animated item texture,
-  and the mesh is built once from it; the game builds spans per frame, so for an animated item texture this can differ
-  (none of the items in the eight jars animates by `.mcmeta`; the clock and compass are chosen by code). A layer over 128 x 128
-  pixels, or needing more than 1,040 elements (a checkerboard alpha has one strip per pixel edge), is **refused**: left out,
-  with the reason (the most any item in the jars needs is 260 quads). Layer N carries `tintindex` N. The one liberty: layers above the
-  first are made 0.005 units thicker per layer so coplanar layers do not z-fight in a viewer (the game draws them in order).
+  (a gap ends the list; `layer5` is not read). Each layer: a front and a back face over the whole square at z 7.5 to 8.5
+  (the back face's u runs the other way, `[16 0 0 16]`, so that it samples the same texel as the front at the same x), and
+  the side strips. **The strips follow the 26.x rule**: one strip per pixel edge where an opaque pixel (alpha above 0 in a
+  frame the game shows) meets a transparent one or the border, each strip's UV its pixel shrunk by 0.1 texel on every side
+  so that filtering does not bleed. **Older versions differ**: 1.8 to 1.12 (read in 1.12.2) merge strips into one span per
+  side and row or column, and a span runs across any gap in that row, so a row with two separate opaque groups gets one strip
+  over both; they do not inset the UV. This crate does not reproduce that: with the nearest filtering the textures want, the
+  extra strip is the one visible difference (a strip across a transparent gap), and the rest is the same picture. The jars
+  from 1.13 to 1.21.3 were not read; they are assumed to behave like 1.12.2 here, unconfirmed (as are `z` and `!` below).
+  **Left out:** the game names the left and right strips with the opposite direction (east for a strip on the west edge) and draws
+  them without culling; this crate gives them the outward direction, which changes only their shading and makes them visible to
+  a viewer that culls back faces. **Opacity is the union over the frames the animation lists** (frame 0 for a sprite the game
+  treats as static, including one with a single valid frame left), and the mesh is built once from it; the game builds spans
+  per frame, so for an animated item texture that can differ (none of the items in the eight jars animates by `.mcmeta`; the clock and
+  compass are chosen by code). A layer over 128 x 128 pixels, or needing more than 1,040 elements (a checkerboard alpha has one
+  strip per pixel edge), is **refused**: left out, with the reason (the most any item in the jars needs is 260 quads). Layer N
+  carries `tintindex` N. The one liberty: layers above the first are made 0.005 units thicker per layer so coplanar layers do
+  not z-fight in a viewer (the game draws them in order).
 - **Item definitions** (1.21.4 and later) are walked to their **default branch**: `model` is itself, `composite` is all of its
   models, `condition` takes `on_false`, `select` and `range_dispatch` take `fallback` (else the first case). A judgment call worth knowing:
   a `select` on `display_context` (26 items: bundles, spears, the spyglass ...) names the contexts where the item is a flat
@@ -262,8 +270,11 @@ texels opaque is `Opaque` (the same in any layer), only alpha 0 and 255 is `Mask
 `force_translucent` is `Blend`. That is not a statement about what the game does for a given block.
 
 **Listing.** `list` gives every block whose blockstate reaches a model with geometry and every item whose default model has
-some: 1,090 for 1.12.2, 2,465 for 1.20.1, 2,784 for 26.3. Block entities and the like are not listed; `mc-unpack list
---left-out` names them.
+some: 1,090 for 1.12.2, 2,465 for 1.20.1, 2,786 for 26.3. Block entities and the like are not listed; `mc-unpack list
+--left-out` names them. What a load would refuse is not listed either: the default state of a block, and an item, are baked
+when listing, so one over the limits of a bake, or with a part that fails, is left out of the list (a failed part is printed
+as an error by `list`). `Model::name` and `AssetInfo::name` carry the state text exactly as the jar writes it: a program
+that prints them should escape control characters (the command line does).
 
 ## Checking
 
@@ -281,8 +292,8 @@ some: 1,090 for 1.12.2, 2,465 for 1.20.1, 2,784 for 26.3. Block entities and the
 | 26.3 | 3,964 | 218 | 1,288 | 2,883 | 1,309 | 1,658 | 1,288 | 1,658 | 0 |
 
 Every number above is a file that parsed or baked. `check` also counts, apart from failures: faces and elements left out inside
-models that otherwise bake (5 to 8 per version: the faces of flat elements that have no area, in `pitcher_plant` and the
-mangrove propagules, written with a face for every side), items that lost a part to code or a refusal (0 in the jars here). A composite item with one part that fails to bake (a missing
+models that otherwise bake (0 / 5 / 8 / 7 / 7 / 7 for 1.12.2, 1.19.2, 1.20.1, 1.21.1, 26.2, 26.3: the faces of flat
+elements that have no area, in `pitcher_plant` and the mangrove propagules, written with a face for every side), items that lost a part to code or a refusal (0 in the jars here). A composite item with one part that fails to bake (a missing
 texture) counts as **failed**, not ok. Things that needed a decision, each found by `check` failing first:
 
 - `scaffolding_unstable` (1.19 to 1.21.1) names the cull face `bottom`: read as none, as the game does.
@@ -302,18 +313,21 @@ multiple of what a real jar needs (`check` prints the biggest it met next to the
 | frames in a texture sheet | 4,096 | 64 |
 | steps in an animation's `frames` list | 4,096 | 64 |
 | size of a generated item layer, and its elements | 128 x 128, 1,040 elements | 16 x 16 mostly, 259 elements for an item |
-| one bake: models (parts) | 208 | 52 (a multipart block with every part at once) |
-| one bake: quads | 1,040 | 260 (a diamond sword) |
+| one model file: elements, and faces in them | 88 and 316 | 22 (`comparator_on_subtract`, 26.3) and 79 (`cauldron_level1`, 1.12.2) |
+| one bake (a block's state, or an item): models (parts) | 208 | 52 (a multipart block with every part at once) |
+| one bake: quads, added up over its parts as they are baked | 1,040 | 260 (a diamond sword) |
 | one mesh: bytes of first-frame images | 160 KiB | 40,960 bytes |
 | decoded textures kept for reuse | 128 MiB (the cache empties) | a few MiB |
-| parsed blockstates, models kept | 20,000 each (the cache empties) | about 4,300 |
+| parsed blockstates, models kept (accounted at ten times their JSON text; the three caches empty together) | 64 MiB | 31 MiB for a whole sweep of 26.3 |
 | any other entry | 16 MiB | not read |
 
 An entry is read through a limit, never sized from what its zip header declares (a 408 KB jar that declared 100 bytes and
 inflated to 400 MiB now stops at the limit), and a 42 MB JSON that went to a 1.6 GB peak is refused from its header. The
 sweep peaks at 86 MB over all eight jars. Names of entries with control or direction-override characters are not indexed, and
 text that came from a jar is printed with them escaped, so a hostile jar cannot rewrite a terminal. `Quad::texture` is an
-`Arc<str>` (one allocation per model, not one per face), and quads are grouped by material through a map.
+`Arc<str>` (one allocation per model, not one per face), a model shares the elements it inherits with its parent
+(one allocation), and quads are grouped by material through a map. An item (or block) that names too many models, or whose
+models add up past the quad limit, is refused as it is baked: the parts after the one that crossed the limit are not baked.
 
 `check-bridge` loads everything `list` gives through the Provider and validates each `Model`: 1,090 / 2,070 / 2,465 / 2,600 /
 2,575 / 2,786 loaded of as many listed for 1.12.2, 1.19.2, 1.20.1, 1.21.1, 26.2 and 26.3, 0 failures. An item with a
@@ -325,7 +339,7 @@ materials; options are the checker's, `--help` lists them; put `--mc-version` be
 **no errors and no warnings** (exit status 0); the same assets in bridge-testbed give a 1.000 x 1.000 x 1.000 m box for
 `block/stone`, identical to the Hytale block it is compared with (AABB `[-0.5, 0, -0.5]` to `[0.5, 1, 0.5]`).
 
-Tests: `cargo test` runs 149 unit tests on tiny synthetic jars built in the tests (no game data anywhere; they include a zip that
+Tests: `cargo test` runs 159 unit tests on tiny synthetic jars built in the tests (no game data anywhere; they include a zip that
 lies about its size and PNGs over the limits) and 24 real-data tests
 in `tests/game_data.rs` that read the installed jars and skip, saying so, where a version is not installed. The real-data
 tests pin, among others: grass tint equals plains `#91bd59` from the jar's own colormap and biome; stairs facing east have
