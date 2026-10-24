@@ -140,39 +140,57 @@ In short:
   `[u0 v0 u1 v1]` is laid on them as `(u0,v0) (u0,v1) (u1,v1) (u1,v0)`; a face `rotation` of r shifts that by r/90 corners.
   With no `uv`, the rectangle is the element's own extent projected on the face (a half-height slab's side shows the lower
   half of the texture).
-- **Element rotation.** Right-handed about the axis through `origin`; `rescale` then stretches the other two axes by
-  1 / cos(angle), defined up to 45 degrees (the game accepts -45 to 45): beyond that the element is left out with a note,
-  never a huge scale. 26.x also writes `{x, y, z, origin}`, composed `Rx * Ry * Rz`. **That order is the game's code, not the
-  data**, and the data cannot prove it: the only two Euler rotations in the jars (`template_hanging_sign_rot_*`: x 180,
-  y -67.5, z -180) give the same result for `Rx * Ry * Rz` and for `Rz * Ry * Rx`, which is all that can be said. A rotation
-  for which those two differ is refused (the element is left out, with a note) instead of guessed. A face with no area (the
-  side faces of a flat element) is not emitted. A face whose `#texture` nothing defines is left out with a note, like
-  `heavy_core`'s: the game draws its built-in missing-texture pattern there.
-- **Variant rotation.** `x` first, then `y`, about the block centre: `y: 90` turns north to east (clockwise from above),
-  `x: 90` turns up to north. **`uvlock`**: a corner's UV is re-derived by laying it on its face plane, rotating it with the
+- **Face textures are slot names.** A face's `texture` is the name of a slot in the model's `textures`, written with or
+  without the `#` (`"all"` and `"#all"` are the same; Mojang's `heavy_core` model uses the first form, in 1.21.1, 26.2 and
+  26.3, and is an ordinary block), never a path. A slot's value is a path, or `#another` slot, which is followed. A name no
+  slot defines leaves that face out, with a note: the game draws its built-in missing-texture pattern there.
+- **Element rotation.** Right-handed about the axis through `origin`. With `rescale`, each axis is first stretched by 1 / the
+  largest component of where it ends up after the turn, which is 1 / cos(angle) up to 45 degrees and is defined beyond
+  (that is the 26.x rule; 1.8 to 1.21 only accept -45 to 45, where the two agree). 26.x also writes `{x, y, z, origin}`; a missing
+  angle is 0, and `rescale` works the same. The angles are applied **x first, then y, then z** (the matrix `Rz * Ry * Rx`, which the game's own
+  code writes as one rotation; the two Euler rotations in the jars, `template_hanging_sign_rot_*` with x 180, y -67.5,
+  z -180, are the only ones and come out as a turn about Y). A face with no area (the side faces of a flat element) is not
+  emitted, and a note counts them.
+- **Variant rotation.** `x` first, then `y`, then `z`, about the block centre: `y: 90` turns north to east (clockwise from
+  above), `x: 90` turns up to north, `z: 90` turns east to down. 26.x blockstates may have `z` (none of the jars here do);
+  the versions before it do not read it, so there it is ignored, with a note. **`uvlock`**: a corner's UV is re-derived by laying it on its face plane, rotating it with the
   block, and reading it back in the UV frame of the face it ended on. Checked against real stairs: with `uvlock` the same world
   position gets the same UV in all four facings (a real-data test).
+- **Multipart `!`.** A condition value may be `a|b` (any of them), and may be negated. The two versions of the game that were
+  read disagree on `!a|b`: 1.8 to 1.12 negate the whole value (neither `a` nor `b`), 26.x negate each term (not `a`, or `b`).
+  This crate follows each by the jar's layout; for the jars between (1.13 to 1.21.3) the rule is not confirmed, so a `!`
+  combined with `|` is refused there (the part does not apply, with a note). A single negated term, and plain alternatives, read the same everywhere.
+  None of the jars here has a `!` in a blockstate.
 - **Cull faces** are kept on the quads (rotated with the block) and not applied: a lone block shows every face. A cull face
   name the game does not know (Mojang's own `scaffolding_unstable` says `bottom`) means none, as in the game.
 - **Textures.** A texture's `.mcmeta` `animation` says frame size (given, else the shorter side), the frame order and time
   per frame (`frames`, else every frame of the sheet in order), `interpolate`. UVs refer to **one frame**, so a model draws a
   frame, not the sheet. The default is **the first frame the animation lists** (`fire_0` lists 16 first, so that is not
   sheet frame 0); a texture without `frames` starts at sheet frame 0.
+- **Invalid animation frames.** As in the game, a listed frame that is not on the sheet is dropped; with one frame or none left
+  the texture is not animated at all (it is the sheet's first frame, whatever the one listed frame was).
 - **What the format defaults, and what is required.** Read as the format defines them, not as this crate guesses: `weight` 1,
-  `uvlock` false, `x`/`y` 0, element `shade` true, face `rotation` 0, no `cullface`, no `tintindex`, a rotation's `rescale`
-  false, `frametime` 1 and `interpolate` false in a `.mcmeta`. Required, because the data always gives them (an error where
-  they are missing): a rotation's `origin` (all 303 in 26.3 have one) and, in the Euler form, all of `x`, `y` and `z`; the
-  `temperature` and `downfall` of a `grass` item tint (without them the tint is left uncoloured, with a note). `from` and
-  `to` must lie in -16 to 32, the range the game accepts, and every number must be finite; a face `rotation` or `tintindex`
-  written `90.0` is read as 90, anything that is not a whole number is an error, never a silent 0.
-- **Generated items.** For each `layerN` texture: a front and a back face over the whole square at z 7.5 to 8.5, and a
-  one-pixel-wide strip on every edge where an opaque pixel (alpha above 0 in some frame) meets a transparent one or the border,
-  merged along runs, each strip showing its pixel's texels (the back face's u runs the other way, `[16 0 0 16]`, so that it
-  samples the same texel as the front at the same x). **Opacity is the union over the frames** of an animated item texture,
+  `uvlock` false, `x`/`y`/`z` 0, element `shade` true, face `rotation` 0 (read modulo 360, so 360 and -90 are fine), no
+  `cullface` (a name the game does not know is none), no `tintindex`, a rotation's `rescale` false, each missing Euler angle 0,
+  `frametime` 1 and `interpolate` false in a `.mcmeta`. A model with an `elements` key whose list is empty replaces its parent's
+  elements in 26.x and **inherits them** in 1.8 to 1.12. Required, as in the game (an error where they are missing): a rotation's `origin`, an
+  element's `faces` (at least one), and, for this crate, the `temperature` and `downfall` of a `grass` item tint (the game's
+  own default is in code: without them the tint is left uncoloured, with a note). `from` and `to` must lie in -16 to 32, every number must be
+  finite, `light_emission` is 0 to 15; a face `rotation`, `tintindex` or a `.mcmeta` number written `90.0` is read as 90, anything that is not a
+  whole number or is out of range is an error, never a silent 0 or a truncation (the game truncates a fraction; this crate
+  refuses it).
+- **Generated items.** Only `layer0` to `layer4`, in order, stopping at the first one that is missing or does not resolve
+  (a gap ends the list; `layer5` is not read). Each layer: a front and a back face over the whole square at z 7.5 to 8.5, and
+  one strip **per pixel edge** where an opaque pixel (alpha above 0 in some frame) meets a transparent one or the border,
+  not merged into runs, each strip's UV its pixel shrunk by 0.1 texel on every side so that filtering does not bleed (the
+  back face's u runs the other way, `[16 0 0 16]`, so that it samples the same texel as the front at the same x). **Left out:**
+  the game names the left and right strips with the opposite direction (east for a strip on the west edge) and draws them
+  without culling; this crate gives them the outward direction, which changes only their shading and makes them visible to
+  a viewer that culls back faces. **Opacity is the union over the frames** of an animated item texture,
   and the mesh is built once from it; the game builds spans per frame, so for an animated item texture this can differ
   (none of the items in the eight jars animates by `.mcmeta`; the clock and compass are chosen by code). A layer over 128 x 128
-  pixels, or needing more than 2,048 elements (a checkerboard alpha has one strip per pixel edge), is **refused**: left out,
-  with the reason (the most any item in the jars needs is 204 quads). Layer N carries `tintindex` N. The one liberty: layers above the
+  pixels, or needing more than 1,040 elements (a checkerboard alpha has one strip per pixel edge), is **refused**: left out,
+  with the reason (the most any item in the jars needs is 260 quads). Layer N carries `tintindex` N. The one liberty: layers above the
   first are made 0.005 units thicker per layer so coplanar layers do not z-fight in a viewer (the game draws them in order).
 - **Item definitions** (1.21.4 and later) are walked to their **default branch**: `model` is itself, `composite` is all of its
   models, `condition` takes `on_false`, `select` and `range_dispatch` take `fallback` (else the first case). A judgment call worth knowing:
@@ -263,15 +281,12 @@ some: 1,090 for 1.12.2, 2,465 for 1.20.1, 2,784 for 26.3. Block entities and the
 | 26.3 | 3,964 | 218 | 1,288 | 2,883 | 1,309 | 1,658 | 1,288 | 1,658 | 0 |
 
 Every number above is a file that parsed or baked. `check` also counts, apart from failures: faces and elements left out inside
-models that otherwise bake (2 in 1.21.1, 26.2 and 26.3: `heavy_core` and its item), items that lost a part to code or a
-refusal (0 in the jars here), and the upstream defects below. A composite item with one part that fails to bake (a missing
+models that otherwise bake (5 to 8 per version: the faces of flat elements that have no area, in `pitcher_plant` and the
+mangrove propagules, written with a face for every side), items that lost a part to code or a refusal (0 in the jars here). A composite item with one part that fails to bake (a missing
 texture) counts as **failed**, not ok. Things that needed a decision, each found by `check` failing first:
 
 - `scaffolding_unstable` (1.19 to 1.21.1) names the cull face `bottom`: read as none, as the game does.
 - 250 armor-trim items in 1.20.1 and 1.21.1 name textures with no PNG: generated from the atlas definition (above).
-- `heavy_core` (1.21.1, 26.2, 26.3) writes `"texture": "all"` where `"#all"` was meant, in all six faces: the game draws its
-  built-in missing-texture pattern, which is code. The faces are left out, the block and item are listed as left out, and `check`
-  prints the upstream defect without counting it as a failure.
 - "item templates" (`item/generated`, `item/handheld`, ...) are models other models inherit from, not items.
 
 ### Limits
@@ -286,23 +301,32 @@ multiple of what a real jar needs (`check` prints the biggest it met next to the
 | pixels of a PNG, from its header, before decoding | 2048 x 2048 | 512 x 512 (a GUI image; block and item textures: 16 x 16 to 16 x 1024) |
 | frames in a texture sheet | 4,096 | 64 |
 | steps in an animation's `frames` list | 4,096 | 64 |
-| size of a generated item layer, and its elements | 128 x 128, 2,048 elements | 16 x 16 mostly, 204 quads for an item |
+| size of a generated item layer, and its elements | 128 x 128, 1,040 elements | 16 x 16 mostly, 259 elements for an item |
+| one bake: models (parts) | 208 | 52 (a multipart block with every part at once) |
+| one bake: quads | 1,040 | 260 (a diamond sword) |
+| one mesh: bytes of first-frame images | 160 KiB | 40,960 bytes |
+| decoded textures kept for reuse | 128 MiB (the cache empties) | a few MiB |
+| parsed blockstates, models kept | 20,000 each (the cache empties) | about 4,300 |
 | any other entry | 16 MiB | not read |
 
 An entry is read through a limit, never sized from what its zip header declares (a 408 KB jar that declared 100 bytes and
 inflated to 400 MiB now stops at the limit), and a 42 MB JSON that went to a 1.6 GB peak is refused from its header. The
-sweep peaks at 85 MB over all eight jars.
+sweep peaks at 86 MB over all eight jars. Names of entries with control or direction-override characters are not indexed, and
+text that came from a jar is printed with them escaped, so a hostile jar cannot rewrite a terminal. `Quad::texture` is an
+`Arc<str>` (one allocation per model, not one per face), and quads are grouped by material through a map.
 
-`check-bridge` loads everything `list` gives through the Provider and validates each `Model`: 1,090 / 2,070 / 2,465 / 2,598 /
-2,573 / 2,784 loaded of as many listed for 1.12.2, 1.19.2, 1.20.1, 1.21.1, 26.2 and 26.3, 0 failures.
+`check-bridge` loads everything `list` gives through the Provider and validates each `Model`: 1,090 / 2,070 / 2,465 / 2,600 /
+2,575 / 2,786 loaded of as many listed for 1.12.2, 1.19.2, 1.20.1, 1.21.1, 26.2 and 26.3, 0 failures. An item with a
+part that failed to bake does not load (`Provider::load` returns the error); an item that only lost a part to code or a
+refusal loads, and `check-bridge` counts those apart.
 
 `check-conformance` runs the bridge's conformance checker over what the Provider returns (scale, orientation, winding,
 materials; options are the checker's, `--help` lists them; put `--mc-version` before the subcommand). On every version above,
 **no errors and no warnings** (exit status 0); the same assets in bridge-testbed give a 1.000 x 1.000 x 1.000 m box for
 `block/stone`, identical to the Hytale block it is compared with (AABB `[-0.5, 0, -0.5]` to `[0.5, 1, 0.5]`).
 
-Tests: `cargo test` runs 124 unit tests on tiny synthetic jars built in the tests (no game data anywhere; they include a zip that
-lies about its size and PNGs over the limits) and 23 real-data tests
+Tests: `cargo test` runs 149 unit tests on tiny synthetic jars built in the tests (no game data anywhere; they include a zip that
+lies about its size and PNGs over the limits) and 24 real-data tests
 in `tests/game_data.rs` that read the installed jars and skip, saying so, where a version is not installed. The real-data
 tests pin, among others: grass tint equals plains `#91bd59` from the jar's own colormap and biome; stairs facing east have
 their tall side to the east in 1.12.2, 1.21.1 and 26.3; `uvlock` keeps planks aligned in all four facings; a wall torch
