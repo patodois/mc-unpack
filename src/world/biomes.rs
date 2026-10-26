@@ -10,6 +10,9 @@ use crate::tint::ColormapKind;
 /// The id of "no biome known": a chunk that stores numeric biome ids, a name the jar has no data for
 pub const NO_BIOME: u16 = 0;
 
+/// Distinct biome names one load keeps (a game with every datapack has a few hundred)
+pub const MAX_BIOMES: usize = 4096;
+
 pub struct BiomeTable<'a> {
     assets: &'a Assets,
     pub names: Vec<String>,
@@ -46,6 +49,10 @@ impl<'a> BiomeTable<'a> {
     pub fn resolve(&mut self, name: &str) -> u16 {
         if let Some(&i) = self.index.get(name) {
             return i;
+        }
+        // a table this long is not a game's biome list; the rest are read as unknown
+        if self.names.len() >= MAX_BIOMES {
+            return NO_BIOME;
         }
         let mut colors = [None; 4];
         let known = match self.assets.biome(name) {

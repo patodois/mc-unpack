@@ -38,6 +38,13 @@ pub const SECTION_BLOCKS: usize = 4096;
 /// More than a section can hold (4096 blocks): a palette this long is not a real one
 pub const MAX_PALETTE: usize = 4096;
 
+/// The longest name the game writes is about 40 bytes (`minecraft:waxed_weathered_cut_copper_stairs`);
+/// a property is a short word and a short value. Longer ones are not blocks of any version, and a
+/// hostile file could otherwise fill memory with distinct ones.
+pub const MAX_NAME: usize = 256;
+pub const MAX_PROP: usize = 128;
+pub const MAX_PROPS: usize = 64;
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PaletteEntry {
     /// `minecraft:oak_stairs`
@@ -171,17 +178,23 @@ fn palette_entry(t: &Tag) -> anyhow::Result<PaletteEntry> {
         }
         other => bail!("a palette entry of NBT type {}", other.type_id()),
     };
-    if name.is_empty() {
-        bail!("a palette entry with an empty name");
+    if name.is_empty() || name.len() > MAX_NAME {
+        bail!("a palette entry with a name of {} bytes", name.len());
     }
     let mut props = Vec::new();
     if let Some(p) = raw_props {
         let c = p.as_compound().context("`Properties` is not a compound")?;
+        if c.len() > MAX_PROPS {
+            bail!("{name} has {} properties", c.len());
+        }
         let mut m = BTreeMap::new();
         for (k, v) in c {
             let v = v
                 .as_str()
                 .with_context(|| format!("property {k} of {name} is not a string"))?;
+            if k.len() > MAX_PROP || v.len() > MAX_PROP {
+                bail!("a property of {name} is longer than {MAX_PROP} bytes");
+            }
             m.insert(k.clone(), v.to_string());
         }
         props = m.into_iter().collect();
@@ -308,7 +321,11 @@ pub fn parse_chunk(root: &Tag, expect: Option<(i32, i32)>) -> Result<Chunk, Chun
             .get("Y")
             .and_then(Tag::as_i64)
             .context("a section with no Y")?;
-        let y = i32::try_from(y).context("section Y out of range")?;
+        // a byte in every version; a section list that spans more than that is not a chunk
+        if !(-128..=127).contains(&y) {
+            return Err(anyhow!("section Y {y} is outside a byte").into());
+        }
+        let y = y as i32;
         let (pal, data) = if old {
             (s.get("Palette"), s.get("BlockStates"))
         } else {

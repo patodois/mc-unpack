@@ -215,10 +215,14 @@ impl Minecraft {
                 let Ok(regions) = w.regions(&d) else { continue };
                 let Ok(dir) = w.region_dir(&d) else { continue };
                 for (x, z) in regions {
-                    let chunks =
-                        crate::world::region::Region::open(&dir.join(format!("r.{x}.{z}.mca")))
-                            .map(|r| r.chunk_count())
-                            .unwrap_or(0);
+                    let file = dir.join(format!("r.{x}.{z}.mca"));
+                    // a region of chunks the game never finished shows nothing: not offered
+                    if !crate::world::grid::has_finished_chunk(&file) {
+                        continue;
+                    }
+                    let chunks = crate::world::region::Region::open(&file)
+                        .map(|r| r.chunk_count())
+                        .unwrap_or(0);
                     let id = WorldId {
                         save: s.label.clone(),
                         window: mesher::Window::region(x, z),
@@ -726,5 +730,134 @@ mod tests {
         assert!(!ids.contains(&"item/big".to_string()), "{ids:?}");
         let e = m.load("item/big").unwrap_err();
         assert!(e.downcast_ref::<LeftOutError>().is_some(), "{e}");
+    }
+
+    #[test]
+    fn a_world_region_is_a_scene_with_a_model_per_chunk_column() {
+        use crate::world::mesher::Limits;
+        use crate::world::save::SaveRef;
+        use crate::world::testworld::*;
+        use rewrite_bridge::conformance::{check_scene, Expect};
+        use rewrite_bridge::SceneModel;
+        let mut a = ChunkSpec::new(0, 0);
+        a.fill((1, 64, 1), (2, 64, 1), "minecraft:stone");
+        a.set(3, 64, 3, "minecraft:grass_block", &[("snowy", "false")]);
+        let mut b = ChunkSpec::new(-1, 0);
+        b.set(-2, -10, 4, "minecraft:glass", &[]);
+        let mut w = ChunkSpec::new(32, 0);
+        w.set(32 * 16 + 1, 64, 1, "minecraft:stone", &[]);
+        let save = write_world("bridge-world", "9.9", 9000, &[a, b, w], false);
+        let saves = vec![SaveRef {
+            label: "My World".into(),
+            path: save.clone(),
+            instance: None,
+        }];
+        let mc = Minecraft::from_assets(crate::world::testworld::world_jar())
+            .unwrap()
+            .with_saves(saves);
+        // two regions with chunks: (-1,0) and (0,0) hold the first two chunks, (1,0) the third
+        let levels: Vec<_> = mc.list("world/").unwrap();
+        assert_eq!(levels.len(), 3, "{levels:?}");
+        assert!(levels.iter().all(|l| l.kind == AssetKind::Level));
+        let ids: Vec<&str> = levels.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "world/My World/-1,0",
+                "world/My World/0,0",
+                "world/My World/1,0"
+            ]
+        );
+        assert!(
+            levels[1].name.contains("1 chunks") && levels[1].name.contains("Minecraft 9.9"),
+            "{}",
+            levels[1].name
+        );
+        // blocks and items are still listed, worlds only with the filter
+        assert!(mc.list("").unwrap().len() > 3);
+        assert!(mc
+            .list("glass")
+            .unwrap()
+            .iter()
+            .all(|l| l.kind == AssetKind::Prop));
+
+        let (scene, report) = mc.load_world_report("world/My World/0,0").unwrap();
+        scene.validate().unwrap();
+        assert_eq!(scene.models.len(), 1);
+        assert_eq!(scene.instances.len(), 1);
+        assert_eq!(scene.instances[0].transform.translation, [0.0, 0.0, 0.0]);
+        let SceneModel::Inline(m) = &scene.models[0] else {
+            panic!()
+        };
+        // 2 stones side by side: 10 quads; the grass block: 6
+        let tris: usize = m.meshes.iter().map(|x| x.indices.len() / 3).sum();
+        assert_eq!(tris, 16 * 2);
+        assert_eq!(report.blocks, 3);
+        // grass is tinted: its material is its own
+        assert!(m
+            .materials
+            .iter()
+            .any(|x| x.name.starts_with("block/grass_block#")));
+        let (e, _) = mc.load_world_report("world/My World/-1,0").unwrap();
+        // chunk -1,0 is at x -16 .. -1
+        assert_eq!(e.instances[0].transform.translation, [-16.0, 0.0, 0.0]);
+        let (r, _) = mc.load_world_report("world/My World/0,0?radius=1").unwrap();
+        assert_eq!(r.instances.len(), 3);
+        assert!(r
+            .instances
+            .iter()
+            .any(|i| i.transform.translation == [512.0, 0.0, 0.0]));
+        // through the trait, and what the checker says
+        let s = mc.load_scene("world/My World/0,0").unwrap();
+        let rep = check_scene(&s, &Expect::for_kind(AssetKind::Level));
+        assert!(
+            rep.is_clean(),
+            "{}",
+            rep.render(rewrite_bridge::conformance::Severity::Info)
+        );
+        // what is not a scene, and what is not there
+        assert!(mc
+            .load("world/My World/0,0")
+            .unwrap_err()
+            .to_string()
+            .contains("load_scene"));
+        assert!(mc
+            .load_scene("block/stone")
+            .unwrap_err()
+            .downcast_ref::<rewrite_bridge::NotSupported>()
+            .is_some());
+        let e = mc.load_scene("world/Nope/0,0").unwrap_err().to_string();
+        assert!(
+            e.contains("no save called") && e.contains("My World"),
+            "{e}"
+        );
+        assert!(
+            mc.load_scene("world/My World/9,9").is_ok(),
+            "a region with no file is an empty scene"
+        );
+        // the budgets are the provider's to set
+        let tight = Minecraft::from_assets(crate::world::testworld::world_jar())
+            .unwrap()
+            .with_saves(vec![SaveRef {
+                label: "My World".into(),
+                path: save.clone(),
+                instance: None,
+            }])
+            .with_world_limits(Limits {
+                max_quads: 3,
+                ..Limits::default()
+            });
+        assert!(tight
+            .load_scene("world/My World/0,0")
+            .unwrap_err()
+            .to_string()
+            .contains("more than 3 quads"));
+        // a provider with no saves lists none
+        assert!(Minecraft::from_assets(crate::world::testworld::world_jar())
+            .unwrap()
+            .list("world/")
+            .unwrap()
+            .is_empty());
+        crate::world::testworld::cleanup(&save);
     }
 }

@@ -222,6 +222,34 @@ fn region_span(lo: i32, hi: i32) -> std::ops::RangeInclusive<i32> {
     (lo >> 5)..=(hi >> 5)
 }
 
+/// Whether a region file holds a chunk the game had finished and this crate can read: the first one
+/// found ends the search. Used to list only regions that would show something.
+pub fn has_finished_chunk(path: &Path) -> bool {
+    let Ok(mut r) = Region::open(path) else {
+        return false;
+    };
+    for lz in 0..32u32 {
+        for lx in 0..32u32 {
+            if !r.has_chunk(lx, lz) {
+                continue;
+            }
+            let Ok(Some(raw)) = r.read_chunk(lx, lz) else {
+                continue;
+            };
+            let Ok((_, root)) = nbt::parse(&raw) else {
+                continue;
+            };
+            let (cx, cz) = (r.x * 32 + lx as i32, r.z * 32 + lz as i32);
+            if let Ok(c) = parse_chunk(&root, Some((cx, cz))) {
+                if is_finished(&c.status) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Reads the chunks `window` (inclusive chunk coordinates) and a one-chunk border around it from
 /// the region files in `region_dir`
 pub fn load(
@@ -232,6 +260,9 @@ pub fn load(
     limits: &LoadLimits,
 ) -> Result<(BlockGrid, LoadStats)> {
     let (wx0, wz0, wx1, wz1) = window;
+    if (wx1 as i64 - wx0 as i64 + 3) * (wz1 as i64 - wz0 as i64 + 3) > 1 << 22 {
+        bail!("the window is wider than 4 million chunks");
+    }
     let (ax0, az0, ax1, az1) = (
         wx0.saturating_sub(1),
         wz0.saturating_sub(1),
@@ -244,8 +275,9 @@ pub fn load(
         ..LoadStats::default()
     };
     // the regions that exist, and a count of the chunks they list in the window, before any chunk
-    // is read
-    let mut regions: Vec<Region> = Vec::new();
+    // is read. Files are opened one at a time: a radius of 8 is 361 of them, more than a process
+    // is usually allowed to hold open.
+    let mut regions: Vec<(i32, i32)> = Vec::new();
     for rz in region_span(az0, az1) {
         for rx in region_span(ax0, ax1) {
             let p = region_dir.join(format!("r.{rx}.{rz}.mca"));
@@ -261,7 +293,7 @@ pub fn load(
                     }
                 }
             }
-            regions.push(r);
+            regions.push((rx, rz));
         }
     }
     if stats.listed > limits.max_chunks {
@@ -272,7 +304,8 @@ pub fn load(
         );
     }
     let mut grid = BlockGrid::new(ax0, az0, ax1, az1);
-    for mut r in regions {
+    for (rx, rz) in regions {
+        let mut r = Region::open(&region_dir.join(format!("r.{rx}.{rz}.mca")))?;
         for lz in 0..32u32 {
             for lx in 0..32u32 {
                 let (cx, cz) = (r.x * 32 + lx as i32, r.z * 32 + lz as i32);

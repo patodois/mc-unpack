@@ -357,7 +357,7 @@ impl<'a> StateTable<'a> {
     }
 }
 
-/// Whether axis-aligned rectangles `[u0, v0, u1, v1]` together cover [0,1] x [0,1]
+/// Whether axis-aligned rectangles `[u0, v0, u1, v1]` together cover the unit square (0 to 1 on both axes)
 pub fn covers_unit_square(rects: &[[f32; 4]]) -> bool {
     const EPS: f32 = 1e-4;
     if rects.is_empty() {

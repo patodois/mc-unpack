@@ -295,9 +295,9 @@ dependencies = [
 
 [[package]]
 name = "rewrite-bridge"
-version = "0.2.1"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5b425441f7580367054f138cf3d8a4e2d3ebcfbf6e5077400756ecd4b5ba57a3"
+checksum = "496000fddf9bfc4ffb33034542129f184d646550f256ba5dcd413f2d634b6562"
 
 [[package]]
 name = "serde"

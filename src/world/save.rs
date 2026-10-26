@@ -242,7 +242,7 @@ pub fn discover_saves() -> Vec<SaveRef> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::world::nbt::write::*;
     use crate::world::nbt::Tag;

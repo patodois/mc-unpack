@@ -1,7 +1,6 @@
 //! `level.dat`: a gzip-compressed NBT file at the root of a save. Only what picks the jar and the
 //! spawn point is read.
 
-use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
@@ -9,6 +8,7 @@ use anyhow::{bail, Context, Result};
 
 use super::compress::{decompress, Compression};
 use super::nbt::{self, Tag};
+use super::region::open_regular;
 
 /// A real `level.dat` is a few KiB (a Forge world's registry list makes it 60 KiB)
 pub const MAX_LEVEL_DAT: u64 = 16 << 20;
@@ -69,7 +69,7 @@ pub fn parse_level(root: &Tag) -> Result<LevelInfo> {
 }
 
 pub fn read_level_dat(path: &Path) -> Result<LevelInfo> {
-    let f = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let f = open_regular(path)?;
     let mut raw = Vec::new();
     f.take(MAX_LEVEL_DAT + 1).read_to_end(&mut raw)?;
     if raw.len() as u64 > MAX_LEVEL_DAT {

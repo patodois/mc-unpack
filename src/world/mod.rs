@@ -4,6 +4,8 @@ pub mod biomes;
 pub mod blocks;
 pub mod chunk;
 pub mod compress;
+#[cfg(test)]
+mod fuzz;
 pub mod grid;
 pub mod level;
 pub mod mesher;

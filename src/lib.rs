@@ -18,7 +18,9 @@
 //! - [`bake`]: elements to quads (rotation, `uvlock`, UV rules); [`item`]: the generated-item mesh
 //!   and the `items/` definitions of 1.21.4 and later;
 //! - [`assets`]: the one object that ties them to a jar; [`mesh`]: quads grouped by material;
-//!   [`gltf`]: export; [`check`]: the sweep.
+//!   [`gltf`]: export; [`check`]: the sweep;
+//! - [`world`]: your own saves: NBT, region files, chunks, the block table and the face culling,
+//!   biome tints, and (with the `bridge` feature) the scene.
 
 // Pixel loops read better as chunks_exact(4) than as_chunks; is_multiple_of is newer than some toolchains
 #![allow(clippy::chunks_exact_to_as_chunks, clippy::manual_is_multiple_of)]

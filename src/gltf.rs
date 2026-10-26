@@ -440,4 +440,76 @@ mod tests {
         assert_eq!(untinted[0].tint, None);
         assert_eq!(untinted[0].tint_index, Some(0));
     }
+
+    #[test]
+    fn a_world_is_one_gltf_with_a_node_per_chunk_column() {
+        use crate::world::mesher::{build, BuildOptions, Window};
+        use crate::world::save::World;
+        use crate::world::testworld::{cleanup, world_jar, ChunkSpec};
+        let mut a = ChunkSpec::new(0, 0);
+        a.fill((1, 64, 1), (2, 64, 1), "minecraft:stone");
+        a.set(3, 64, 3, "minecraft:grass_block", &[("snowy", "false")]);
+        let mut b = ChunkSpec::new(-1, 0);
+        b.set(-2, 70, 4, "minecraft:stone", &[]);
+        let save = crate::world::testworld::write_world("gltf-world", "9.9", 9000, &[a, b], false);
+        let assets = world_jar();
+        let w = World::open(&save).unwrap();
+        let mut win = Window::region(0, 0);
+        win.radius = 1;
+        let (mesh, _) = build(&assets, &w, &BuildOptions::new(win)).unwrap();
+        let dir = std::env::temp_dir().join(format!("mc-unpack-gltfw-{}", std::process::id()));
+        let p = super::write_world(&mesh, "w x", &dir).unwrap();
+        let doc: Value = serde_json::from_slice(&fs::read(&p).unwrap()).unwrap();
+        assert_eq!(doc["asset"]["version"], "2.0");
+        let nodes = doc["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.iter().any(|n| n["translation"] == json!([-16, 0, 0])));
+        assert_eq!(doc["scenes"][0]["extras"]["spawn"], json!([8, 70, 8]));
+        // every primitive has its four accessors in range, and the bin is as long as it says
+        let bin_len = fs::metadata(dir.join("w%20x.bin"))
+            .ok()
+            .map(|m| m.len())
+            .unwrap_or_else(|| fs::metadata(dir.join("w x.bin")).unwrap().len());
+        assert_eq!(doc["buffers"][0]["byteLength"], bin_len);
+        assert_eq!(doc["buffers"][0]["uri"], "w%20x.bin");
+        let total: u64 = doc["bufferViews"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["byteLength"].as_u64().unwrap())
+            .sum();
+        assert_eq!(total, bin_len);
+        let nacc = doc["accessors"].as_array().unwrap().len();
+        for m in doc["meshes"].as_array().unwrap() {
+            for pr in m["primitives"].as_array().unwrap() {
+                assert!(pr["indices"].as_u64().unwrap() < nacc as u64);
+                let pos =
+                    &doc["accessors"][pr["attributes"]["POSITION"].as_u64().unwrap() as usize];
+                let idx = &doc["accessors"][pr["indices"].as_u64().unwrap() as usize];
+                // 4 vertices and 6 indices to a quad
+                assert_eq!(
+                    idx["count"].as_u64().unwrap() * 4,
+                    pos["count"].as_u64().unwrap() * 6
+                );
+                assert!(
+                    pr["material"].as_u64().unwrap()
+                        < doc["materials"].as_array().unwrap().len() as u64
+                );
+            }
+        }
+        assert!(doc["images"].as_array().unwrap().len() >= 2);
+        assert!(doc["materials"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["name"]
+                .as_str()
+                .unwrap()
+                .starts_with("block/grass_block#")));
+        // a world with nothing in it is an error, not an empty file
+        let empty = crate::world::mesher::WorldMesh::default();
+        assert!(super::write_world(&empty, "e", &dir).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+        cleanup(&save);
+    }
 }

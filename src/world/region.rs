@@ -29,6 +29,16 @@ pub const MAX_CHUNK_BYTES: usize = 24 << 20;
 /// is 1 MiB; external ones exist because a chunk went over it)
 pub const MAX_EXTERNAL_BYTES: u64 = 32 << 20;
 
+/// Opens a regular file for reading. A folder from anywhere may hold a named pipe or a device where
+/// a file belongs, and opening one of those can wait forever.
+pub fn open_regular(path: &Path) -> Result<File> {
+    let meta = std::fs::metadata(path).with_context(|| format!("opening {}", path.display()))?;
+    if !meta.is_file() {
+        bail!("{} is not a regular file", path.display());
+    }
+    File::open(path).with_context(|| format!("opening {}", path.display()))
+}
+
 pub struct Region {
     file: File,
     len: u64,
@@ -66,7 +76,7 @@ impl Region {
             .context("region path has no file name")?;
         let (x, z) = parse_region_name(name)
             .with_context(|| format!("{name:?} is not named r.<x>.<z>.mca"))?;
-        let mut file = File::open(path).with_context(|| format!("opening {}", path.display()))?;
+        let mut file = open_regular(path)?;
         let len = file.metadata()?.len();
         let mut entries = vec![0u32; 1024];
         if len != 0 {
@@ -163,7 +173,8 @@ impl Region {
         let payload = if external {
             let name = format!("c.{cx}.{cz}.mcc");
             let p = self.dir.join(&name);
-            let f = File::open(&p).with_context(|| format!("{}: external chunk {name}", ctx()))?;
+            let f =
+                open_regular(&p).with_context(|| format!("{}: external chunk {name}", ctx()))?;
             let mut buf = Vec::new();
             f.take(MAX_EXTERNAL_BYTES + 1)
                 .read_to_end(&mut buf)
@@ -279,6 +290,9 @@ pub mod tests {
         let mut r = Region::open(&dir.join("r.0.0.mca")).unwrap();
         assert_eq!(r.chunk_count(), 0);
         assert!(r.read_chunk(0, 0).unwrap().is_none());
+        // a folder where a region file belongs is not one
+        std::fs::create_dir_all(dir.join("r.5.5.mca")).unwrap();
+        assert!(Region::open(&dir.join("r.5.5.mca")).is_err());
         std::fs::write(dir.join("r.0.1.mca"), vec![0u8; 5000]).unwrap();
         assert!(Region::open(&dir.join("r.0.1.mca")).is_err());
         std::fs::write(dir.join("bad.mca"), vec![0u8; 9000]).unwrap();

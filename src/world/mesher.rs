@@ -349,7 +349,7 @@ impl WorldReport {
             "tinted by a biome colormap: {} block(s)",
             self.tinted
         ));
-        for (n, c) in &self.untinted {
+        for (n, c) in self.untinted.iter().take(LIST_LINES) {
             v.push(format!(
                 "  {} x{}: has a tintindex and no colour source in the data or the table: drawn untinted",
                 esc(n),
@@ -362,7 +362,7 @@ impl WorldReport {
                 self.untinted_no_biome
             ));
         }
-        for (b, m) in &self.biome_modifiers {
+        for (b, m) in self.biome_modifiers.iter().take(LIST_LINES) {
             v.push(format!(
                 "  biome {}: {} is applied by the game's code and not here",
                 esc(b),
@@ -387,6 +387,9 @@ impl WorldReport {
         v
     }
 }
+
+/// Lines of any one list in [`WorldReport::lines`]; the report itself holds all of them
+const LIST_LINES: usize = 60;
 
 const DIRS: [[i32; 3]; 6] = [
     [0, -1, 0],
@@ -730,6 +733,12 @@ impl Mesher<'_> {
                 "the scene has more than {} quads (at chunk {cx},{cz}); use a smaller window (--chunks, --y, or a smaller --radius)",
                 self.max_quads
             );
+        }
+        // vectors grown by doubling hold up to twice what they need; the whole scene is held at once
+        for g in &mut groups {
+            g.positions.shrink_to_fit();
+            g.uvs.shrink_to_fit();
+            g.normals.shrink_to_fit();
         }
         Ok(ChunkMesh { cx, cz, groups })
     }
@@ -1164,5 +1173,121 @@ mod tests {
         let (m, r) = run(&[a, b], w);
         assert_eq!(m.chunks.len(), 2);
         assert_eq!(r.load.loaded, 2);
+    }
+
+    /// A whole region of 1024 chunks, 24 sections each (100 million blocks): `cargo test --release
+    /// -- --ignored stress --nocapture`. Two worlds: solid stone (few faces, all the work is
+    /// culling) and noise (every face shows: the quad budget stops it).
+    #[test]
+    #[ignore]
+    fn stress_a_full_region() {
+        use crate::world::chunk::{block_bits, tests::pack_padded};
+        use crate::world::compress::tests::zlib;
+        use crate::world::nbt::write::*;
+        use crate::world::nbt::Tag;
+        use crate::world::region::tests::{region_bytes, temp_dir};
+        for noise in [false, true] {
+            let mut raw = Vec::new();
+            let mut s = 0x0123_4567_89AB_CDEF_u64;
+            for cz in 0..32 {
+                for cx in 0..32 {
+                    let mut sections = Vec::new();
+                    for sy in -4..20 {
+                        let pal: Vec<Tag> = [
+                            "stone",
+                            "glass",
+                            "grass_block",
+                            "oak_leaves",
+                            "air",
+                            "water",
+                        ]
+                        .iter()
+                        .map(|n| compound(vec![("Name", string(&format!("minecraft:{n}")))]))
+                        .collect();
+                        let bits = block_bits(pal.len());
+                        let idx: Vec<u16> = (0..4096)
+                            .map(|_| {
+                                s ^= s >> 12;
+                                s ^= s << 25;
+                                s ^= s >> 27;
+                                if noise {
+                                    ((s.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) % 6) as u16
+                                } else {
+                                    0
+                                }
+                            })
+                            .collect();
+                        let bs = if noise {
+                            compound(vec![
+                                ("palette", Tag::List(pal)),
+                                ("data", Tag::LongArray(pack_padded(&idx, bits))),
+                            ])
+                        } else {
+                            compound(vec![("palette", Tag::List(vec![pal[0].clone()]))])
+                        };
+                        sections.push(compound(vec![
+                            ("Y", Tag::Byte(sy as i8)),
+                            ("block_states", bs),
+                            (
+                                "biomes",
+                                compound(vec![(
+                                    "palette",
+                                    Tag::List(vec![string("minecraft:plains")]),
+                                )]),
+                            ),
+                        ]));
+                    }
+                    let c = compound(vec![
+                        ("DataVersion", Tag::Int(9000)),
+                        ("xPos", Tag::Int(cx)),
+                        ("zPos", Tag::Int(cz)),
+                        ("Status", string("minecraft:full")),
+                        ("sections", Tag::List(sections)),
+                    ]);
+                    raw.push((cx as u32, cz as u32, 2u8, zlib(&document("", &c))));
+                }
+            }
+            // MC_UNPACK_STRESS_KEEP=<folder> keeps the two saves there (`noise`, `solid`) to try the CLI on
+            let keep = std::env::var_os("MC_UNPACK_STRESS_KEEP").map(std::path::PathBuf::from);
+            let dir = match &keep {
+                Some(k) => k.join(if noise { "noise" } else { "solid" }),
+                None => temp_dir("stress"),
+            };
+            let save = dir.join("save");
+            let rd = save.join("dimensions/minecraft/overworld/region");
+            std::fs::create_dir_all(&rd).unwrap();
+            // the 8 KiB table holds 255 sectors at most per chunk: these are small enough
+            std::fs::write(rd.join("r.0.0.mca"), region_bytes(&raw)).unwrap();
+            std::fs::write(
+                save.join("level.dat"),
+                crate::world::compress::tests::gzip(&document(
+                    "",
+                    &compound(vec![(
+                        "Data",
+                        compound(vec![("DataVersion", Tag::Int(9000))]),
+                    )]),
+                )),
+            )
+            .unwrap();
+            drop(raw);
+            let a = world_jar();
+            let w = World::open(&save).unwrap();
+            let t = std::time::Instant::now();
+            let mut o = BuildOptions::new(Window::region(0, 0));
+            o.limits.max_chunks = 1024;
+            let r = build(&a, &w, &o);
+            println!(
+                "{}: {:?} in {:.2} s, peak RSS {} MB",
+                if noise { "noise" } else { "solid stone" },
+                r.as_ref()
+                    .map(|(m, r)| (m.quad_count(), r.blocks))
+                    .map_err(|e| e.to_string()),
+                t.elapsed().as_secs_f64(),
+                crate::check::peak_rss() / 1_000_000
+            );
+            if keep.is_none() {
+                std::fs::remove_dir_all(&dir).unwrap();
+            }
+        }
     }
 }
