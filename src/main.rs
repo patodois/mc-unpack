@@ -27,6 +27,10 @@ struct Cli {
     /// Which installed version to read (`1.20.1`); the newest supported one when omitted
     #[arg(long = "mc-version", global = true, value_name = "VERSION")]
     mc_version: Option<String>,
+    /// For the commands that go through the Provider (`check-conformance`): also offer the saves found
+    /// in the launchers' folders as levels (`world/<save>/<x>,<z>`)
+    #[arg(long, global = true)]
+    with_worlds: bool,
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -93,6 +97,47 @@ enum Cmd {
         /// A biome from the jar's data (1.19 and later), such as `plains`
         #[arg(long)]
         biome: Option<String>,
+    },
+    /// List the saves found in the launchers' folders (read only), with the version each was saved by
+    Worlds,
+    /// Say what a save folder holds: version, dimensions, regions and chunks, and which jar reads it
+    WorldInfo {
+        /// A save folder (the one with level.dat in it)
+        save: PathBuf,
+    },
+    /// Export a part of a save as glTF: the blocks of a region (and `--radius` regions around it), baked
+    /// from the jar's models, with hidden faces dropped and biome tints. Prints what was left out and why.
+    World {
+        /// A save folder (the one with level.dat in it)
+        save: PathBuf,
+        /// The region file's coordinates, `x,z` (`r.x.z.mca`)
+        #[arg(long, value_name = "X,Z", allow_hyphen_values = true)]
+        region: String,
+        /// Regions to add on every side
+        #[arg(long, default_value_t = 0)]
+        radius: u32,
+        /// Keep only these chunks of the window: `x0,z0,x1,z1` in chunk coordinates, inclusive
+        #[arg(long, value_name = "X0,Z0,X1,Z1", allow_hyphen_values = true)]
+        chunks: Option<String>,
+        /// Keep only these block heights: `min,max`, inclusive
+        #[arg(long, value_name = "MIN,MAX", allow_hyphen_values = true)]
+        y: Option<String>,
+        /// `overworld`, `the_nether`, `the_end`, or `namespace:name`
+        #[arg(long, default_value = "overworld")]
+        dimension: String,
+        /// Output folder
+        #[arg(short, long, default_value = "out")]
+        out: PathBuf,
+        /// File name (without extension) for the output
+        #[arg(long)]
+        name: Option<String>,
+        /// Most quads the scene may have (about 100 bytes each in memory)
+        #[arg(long)]
+        max_quads: Option<u64>,
+        /// Also read chunks the game had not finished generating (by default they are left out, as
+        /// the game regenerates them)
+        #[arg(long)]
+        include_unfinished: bool,
     },
     /// Parse and bake everything in every installed version (or the one given); count failures
     Check {
@@ -659,6 +704,185 @@ fn cmd_check_bridge(cli: &Cli) -> Result<bool> {
     Ok(all_ok)
 }
 
+/// `1,-2,3` to numbers
+fn parse_ints(s: &str, n: usize, what: &str) -> Result<Vec<i32>> {
+    let v: Vec<i32> = s
+        .split(',')
+        .map(|p| p.trim().parse::<i32>())
+        .collect::<std::result::Result<_, _>>()
+        .map_err(|_| anyhow!("{what} {s:?}: expected {n} whole numbers separated by commas"))?;
+    if v.len() != n {
+        bail!("{what} {s:?}: expected {n} whole numbers separated by commas");
+    }
+    Ok(v)
+}
+
+/// The jar that reads a save: the explicit or named one, else an installed one of the version the
+/// save was made by
+fn assets_for_world(cli: &Cli, world: &mc_unpack::world::save::World) -> Result<Assets> {
+    if cli.jar.is_some() || cli.mc_version.is_some() {
+        return one_assets(cli);
+    }
+    let lv = &world.level;
+    let mut seen = Vec::new();
+    for j in find_jars() {
+        let Ok(a) = Assets::open(&j.path) else {
+            continue;
+        };
+        let v = a.version();
+        let dv = v.json.as_ref().and_then(|x| x.world_version);
+        let by_name = lv.version_name.as_deref() == Some(v.id.as_str());
+        let by_data = lv.data_version.is_some() && lv.data_version == dv;
+        seen.push(v.id.clone());
+        if (by_name || by_data) && v.support() == Support::Full {
+            eprintln!(
+                "(reading Minecraft {}, the version this save was made by)",
+                v.id
+            );
+            return Ok(a);
+        }
+    }
+    bail!(
+        "this save was made by Minecraft {} (data version {}), and no installed jar is that version (installed: {}); pass --jar or --mc-version to read it with another",
+        esc(lv.version_name.as_deref().unwrap_or("?")),
+        lv.data_version.map(|d| d.to_string()).unwrap_or_else(|| "?".into()),
+        if seen.is_empty() { "none".into() } else { seen.join(", ") }
+    )
+}
+
+fn cmd_worlds() -> Result<()> {
+    use mc_unpack::world::save::{discover_saves, World};
+    let saves = discover_saves();
+    if saves.is_empty() {
+        println!("no saves found in the launchers' folders (MC_UNPACK_SAVES adds folders)");
+    }
+    for s in saves {
+        match World::open(&s.path) {
+            Ok(w) => println!(
+                "{:<24} {:<8} data {:<6} {}",
+                esc(&s.label),
+                esc(w.level.version_name.as_deref().unwrap_or("?")),
+                w.level
+                    .data_version
+                    .map(|d| d.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                esc(&tilde(&s.path))
+            ),
+            Err(e) => println!(
+                "{:<24} unreadable: {}",
+                esc(&s.label),
+                esc(&format!("{e:#}"))
+            ),
+        }
+    }
+    Ok(())
+}
+
+fn cmd_world_info(cli: &Cli, save: &Path) -> Result<()> {
+    use mc_unpack::world::region::Region;
+    use mc_unpack::world::save::World;
+    let w = World::open(save)?;
+    let lv = &w.level;
+    println!("save: {}", esc(&w.name()));
+    println!(
+        "saved by Minecraft {} (data version {}){}",
+        esc(lv.version_name.as_deref().unwrap_or("? (before 1.9)")),
+        lv.data_version
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "none".into()),
+        if lv.snapshot == Some(true) {
+            ", a snapshot"
+        } else {
+            ""
+        }
+    );
+    if let Some(s) = lv.spawn {
+        println!("spawn: {},{},{}", s[0], s[1], s[2]);
+    }
+    for d in w.dimensions() {
+        let regions = w.regions(&d)?;
+        let mut chunks = 0usize;
+        let dir = w.region_dir(&d)?;
+        for (x, z) in &regions {
+            if let Ok(r) = Region::open(&dir.join(format!("r.{x}.{z}.mca"))) {
+                chunks += r.chunk_count();
+            }
+        }
+        let list: Vec<String> = regions
+            .iter()
+            .take(24)
+            .map(|(x, z)| format!("{x},{z}"))
+            .collect();
+        println!(
+            "{d}: {} region(s), {chunks} chunk(s): {}{}",
+            regions.len(),
+            list.join("  "),
+            if regions.len() > 24 { "  ..." } else { "" }
+        );
+    }
+    match assets_for_world(cli, &w) {
+        Ok(a) => println!("read with: Minecraft {}", a.version().id),
+        Err(e) => println!("read with: nothing ({})", esc(&format!("{e:#}"))),
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cmd_world(
+    cli: &Cli,
+    save: &Path,
+    region: &str,
+    radius: u32,
+    chunks: Option<&str>,
+    y: Option<&str>,
+    dimension: &str,
+    out: &Path,
+    name: Option<&str>,
+    max_quads: Option<u64>,
+    include_unfinished: bool,
+) -> Result<()> {
+    use mc_unpack::world::mesher::{build, BuildOptions, Window};
+    use mc_unpack::world::save::World;
+    let w = World::open(save)?;
+    let assets = assets_for_world(cli, &w)?;
+    let r = parse_ints(region, 2, "--region")?;
+    let mut win = Window::region(r[0], r[1]);
+    win.radius = radius;
+    if let Some(c) = chunks {
+        let v = parse_ints(c, 4, "--chunks")?;
+        win.chunks = Some([v[0], v[1], v[2], v[3]]);
+    }
+    if let Some(y) = y {
+        let v = parse_ints(y, 2, "--y")?;
+        win.y = Some((v[0], v[1]));
+    }
+    let mut opts = BuildOptions::new(win);
+    opts.dimension = dimension.to_string();
+    if let Some(m) = max_quads {
+        opts.limits.max_quads = m;
+    }
+    opts.limits.include_unfinished = include_unfinished;
+    let start = std::time::Instant::now();
+    let (mesh, report) = build(&assets, &w, &opts)?;
+    for l in report.lines() {
+        println!("{l}");
+    }
+    let stem = name
+        .map(String::from)
+        .unwrap_or_else(|| file_name_for(&format!("world_{}_{}_{}", w.name(), r[0], r[1])));
+    let p = gltf::write_world(&mesh, &stem, out)?;
+    println!(
+        "wrote {} ({} chunk columns, {} quads, {} materials) in {:.1} s; peak RSS {} MB",
+        esc(&tilde(&p)),
+        mesh.chunks.len(),
+        mesh.quad_count(),
+        mesh.materials.len(),
+        start.elapsed().as_secs_f64(),
+        check::peak_rss() / 1_000_000
+    );
+    Ok(())
+}
+
 fn main() {
     // Die quietly when the reader of our output goes away (`list | head`)
     #[cfg(unix)]
@@ -720,12 +944,42 @@ fn main() {
             biome.clone(),
         )
         .map(|_| true),
+        Cmd::Worlds => cmd_worlds().map(|_| true),
+        Cmd::WorldInfo { save } => cmd_world_info(&cli, save).map(|_| true),
+        Cmd::World {
+            save,
+            region,
+            radius,
+            chunks,
+            y,
+            dimension,
+            out,
+            name,
+            max_quads,
+            include_unfinished,
+        } => cmd_world(
+            &cli,
+            save,
+            region,
+            *radius,
+            chunks.as_deref(),
+            y.as_deref(),
+            dimension,
+            out,
+            name.as_deref(),
+            *max_quads,
+            *include_unfinished,
+        )
+        .map(|_| true),
         Cmd::Check { verbose } => cmd_check(&cli, *verbose),
         #[cfg(feature = "bridge")]
         Cmd::CheckBridge => cmd_check_bridge(&cli),
         #[cfg(feature = "bridge")]
         Cmd::CheckConformance { args } => {
-            let mc = mc_unpack::bridge::Minecraft::from_assets(one_assets(&cli)?)?;
+            let mut mc = mc_unpack::bridge::Minecraft::from_assets(one_assets(&cli)?)?;
+            if cli.with_worlds {
+                mc = mc.with_discovered_saves();
+            }
             std::process::exit(rewrite_bridge::conformance::cli::run(&mc, args.clone()));
         }
     })();

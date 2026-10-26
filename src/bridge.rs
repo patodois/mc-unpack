@@ -45,7 +45,8 @@ use std::sync::OnceLock;
 
 use anyhow::{anyhow, bail, Result};
 use rewrite_bridge::{
-    AlphaMode, AssetInfo, AssetKind, BoxError, Image, Material, Mesh, Model, Node, Provider,
+    AlphaMode, AssetInfo, AssetKind, BoxError, Image, Material, Mesh, Model, Node, NotSupported,
+    Provider, Scene,
 };
 
 pub use crate::assets::AssetId;
@@ -55,6 +56,13 @@ use crate::mesh::{self, MeshOptions, Origin};
 use crate::texture::AlphaClass;
 use crate::tint::TintSet;
 use crate::version::Support;
+use crate::world::mesher::{self, BuildOptions, Limits, WorldReport};
+use crate::world::save::{discover_saves, SaveRef, World};
+use crate::world::scene::{scene_of, WorldId};
+
+/// The first data version of the flattened block format (17w47a); saves older than it hold
+/// numeric block ids, which are in the game's code and are not read
+const FLATTENING: i64 = 1451;
 
 /// The game's own axes carry over, so the bridge's up is the game's up
 pub const GAME: &str = "Minecraft";
@@ -89,6 +97,8 @@ pub struct Minecraft {
     tints: TintSet,
     frame: Option<u32>,
     listing: OnceLock<Vec<AssetInfo>>,
+    saves: Vec<SaveRef>,
+    world_limits: Limits,
 }
 
 fn berr(e: anyhow::Error) -> BoxError {
@@ -109,6 +119,8 @@ impl Minecraft {
             tints: TintSet::new(),
             frame: None,
             listing: OnceLock::new(),
+            saves: Vec::new(),
+            world_limits: Limits::default(),
         })
     }
 
@@ -147,6 +159,104 @@ impl Minecraft {
 
     pub fn assets(&self) -> &Assets {
         &self.assets
+    }
+
+    /// The saves whose regions `list` offers as levels and `load_scene` reads (none by default;
+    /// the provider never looks for worlds on its own)
+    pub fn with_saves(mut self, saves: Vec<SaveRef>) -> Self {
+        self.saves = saves;
+        self
+    }
+
+    /// The saves in the launchers' folders (see [`crate::world::save::discover_saves`])
+    pub fn with_discovered_saves(self) -> Self {
+        self.with_saves(discover_saves())
+    }
+
+    /// The budgets of a world scene: chunks, bytes of blocks, quads
+    pub fn with_world_limits(mut self, limits: Limits) -> Self {
+        self.world_limits = limits;
+        self
+    }
+
+    fn save(&self, label: &str) -> Result<&SaveRef> {
+        self.saves.iter().find(|s| s.label == label).ok_or_else(|| {
+            anyhow!(
+                "no save called {label:?} (known: {})",
+                if self.saves.is_empty() {
+                    "none: give the provider saves with `with_saves` or `with_discovered_saves`"
+                        .to_string()
+                } else {
+                    self.saves
+                        .iter()
+                        .map(|s| s.label.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            )
+        })
+    }
+
+    /// The regions of every save as `Level` assets: `world/<save>/<x>,<z>` (and, for dimensions
+    /// other than the overworld, `?dimension=<name>`)
+    pub fn world_listing(&self) -> Vec<AssetInfo> {
+        let mut out = Vec::new();
+        for s in &self.saves {
+            let Ok(w) = World::open(&s.path) else {
+                continue;
+            };
+            // a save from before the flattening (1.13) holds numeric block ids, which this does not read
+            if !w.level.data_version.is_some_and(|v| v >= FLATTENING) {
+                continue;
+            }
+            let ver = w.level.version_name.clone().unwrap_or_else(|| "?".into());
+            for d in w.dimensions() {
+                let short = d.strip_prefix("minecraft:").unwrap_or(&d).to_string();
+                let Ok(regions) = w.regions(&d) else { continue };
+                let Ok(dir) = w.region_dir(&d) else { continue };
+                for (x, z) in regions {
+                    let chunks =
+                        crate::world::region::Region::open(&dir.join(format!("r.{x}.{z}.mca")))
+                            .map(|r| r.chunk_count())
+                            .unwrap_or(0);
+                    let id = WorldId {
+                        save: s.label.clone(),
+                        window: mesher::Window::region(x, z),
+                        dimension: if short == "overworld" {
+                            "overworld".into()
+                        } else {
+                            short.clone()
+                        },
+                        include_unfinished: false,
+                    }
+                    .to_id();
+                    out.push(AssetInfo {
+                        name: format!(
+                            "{} {short} region {x},{z} ({chunks} chunks, Minecraft {ver})",
+                            s.label
+                        ),
+                        id,
+                        kind: AssetKind::Level,
+                    });
+                }
+            }
+        }
+        out.sort_by(|a, b| a.id.cmp(&b.id));
+        out
+    }
+
+    /// Loads a region of a save as a scene, with the report of what it left out and why
+    pub fn load_world_report(&self, id: &str) -> Result<(Scene, WorldReport)> {
+        let wid = WorldId::parse(id)?;
+        let save = self.save(&wid.save)?;
+        let world = World::open(&save.path)?;
+        let mut opts = BuildOptions::new(wid.window.clone());
+        opts.dimension = wid.dimension.clone();
+        opts.limits = self.world_limits.clone();
+        opts.limits.include_unfinished = wid.include_unfinished;
+        let (mesh, report) = mesher::build(&self.assets, &world, &opts)?;
+        let scene = scene_of(&mesh, &wid.to_id())?;
+        Ok((scene, report))
     }
 
     fn mesh_options(&self) -> MeshOptions {
@@ -322,19 +432,30 @@ impl Provider for Minecraft {
 
     fn list(&self, filter: &str) -> Result<Vec<AssetInfo>, BoxError> {
         let f = filter.to_ascii_lowercase();
-        Ok(self
-            .listing()
-            .iter()
-            .filter(|a| {
-                f.is_empty()
-                    || a.id.to_ascii_lowercase().contains(&f)
-                    || a.name.to_ascii_lowercase().contains(&f)
-            })
-            .cloned()
-            .collect())
+        let hit = |a: &AssetInfo| {
+            f.is_empty()
+                || a.id.to_ascii_lowercase().contains(&f)
+                || a.name.to_ascii_lowercase().contains(&f)
+        };
+        let mut out: Vec<AssetInfo> = self.listing().iter().filter(|a| hit(a)).cloned().collect();
+        out.extend(self.world_listing().into_iter().filter(|a| hit(a)));
+        Ok(out)
+    }
+
+    fn load_scene(&self, id: &str) -> Result<Scene, BoxError> {
+        if !id.starts_with("world/") {
+            return Err(Box::new(NotSupported {
+                game: GAME.to_string(),
+                what: format!("scenes other than worlds ({id:?} is not `world/<save>/<x>,<z>`)"),
+            }));
+        }
+        self.load_world_report(id).map(|r| r.0).map_err(berr)
     }
 
     fn load(&self, id: &str) -> Result<Model, BoxError> {
+        if id.starts_with("world/") {
+            return Err(format!("{id}: a world is a scene: use load_scene").into());
+        }
         self.load_report(id).map(|r| r.0).map_err(|e| {
             // keep the typed error of a left-out asset reachable
             match e.downcast::<LeftOutError>() {

@@ -158,6 +158,8 @@ pub struct Biome {
     pub grass_color: Option<[u8; 3]>,
     pub foliage_color: Option<[u8; 3]>,
     pub dry_foliage_color: Option<[u8; 3]>,
+    /// `effects.water_color`: what the water of the biome is tinted with
+    pub water_color: Option<[u8; 3]>,
     /// `swamp`, `dark_forest` ...: a rule the game applies in code, which is **not** applied here
     pub grass_color_modifier: Option<String>,
     /// `frozen` ...: also applied in code and not here
@@ -190,6 +192,7 @@ impl Biome {
             grass_color: col("grass_color"),
             foliage_color: col("foliage_color"),
             dry_foliage_color: col("dry_foliage_color"),
+            water_color: col("water_color"),
             grass_color_modifier: s(eff, "grass_color_modifier"),
             temperature_modifier: s(Some(&v), "temperature_modifier"),
         })

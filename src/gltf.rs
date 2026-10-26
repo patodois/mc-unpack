@@ -195,6 +195,176 @@ pub fn write(model: &BakedModel, groups: &[Group], name: &str, out_dir: &Path) -
     Ok(path)
 }
 
+/// Writes a world's meshes as one glTF: a node per chunk column (translated to its place in the
+/// world, metres = blocks, the game's axes), one mesh per column with a primitive per material.
+/// Output is `<name>.gltf`, `<name>.bin` and `<name>_<n>.png` (one per distinct image); the binary is
+/// written as it is produced, so the file is never held in memory next to the meshes.
+pub fn write_world(
+    mesh: &crate::world::mesher::WorldMesh,
+    name: &str,
+    out_dir: &Path,
+) -> Result<PathBuf> {
+    use std::io::Write;
+    if mesh.chunks.is_empty() {
+        bail!("{}: nothing to write (no geometry)", mesh.name);
+    }
+    fs::create_dir_all(out_dir).with_context(|| format!("creating {}", out_dir.display()))?;
+    let bin_name = format!("{name}.bin");
+    let mut bin = std::io::BufWriter::new(
+        fs::File::create(out_dir.join(&bin_name))
+            .with_context(|| format!("creating {bin_name}"))?,
+    );
+    let mut offset: usize = 0;
+    let mut views: Vec<Value> = Vec::new();
+    let mut accessors: Vec<Value> = Vec::new();
+    let mut put =
+        |bin: &mut std::io::BufWriter<fs::File>, data: &[u8], target: u32| -> Result<usize> {
+            // every array here is of 4-byte elements, so views stay aligned
+            bin.write_all(data)?;
+            views.push(
+            json!({"buffer": 0, "byteOffset": offset, "byteLength": data.len(), "target": target}),
+        );
+            offset += data.len();
+            Ok(views.len() - 1)
+        };
+
+    // materials, textures, images: shared by the whole world
+    let mut images: Vec<Value> = Vec::new();
+    let mut image_of: HashMap<*const Rgba, usize> = HashMap::new();
+    let mut textures: Vec<Value> = Vec::new();
+    let mut materials: Vec<Value> = Vec::new();
+    for m in &mesh.materials {
+        let key = std::sync::Arc::as_ptr(&m.image);
+        let img = match image_of.get(&key) {
+            Some(&i) => i,
+            None => {
+                let n = images.len();
+                let file = format!("{name}_{n}.png");
+                fs::write(out_dir.join(&file), encode_png(&m.image)?)?;
+                images.push(json!({"uri": uri_encode(&file)}));
+                image_of.insert(key, n);
+                n
+            }
+        };
+        textures.push(json!({"sampler": 0, "source": img}));
+        let mut mat = json!({
+            "name": m.name(),
+            "pbrMetallicRoughness": {
+                "baseColorTexture": {"index": textures.len() - 1},
+                "metallicFactor": 0.0,
+                "roughnessFactor": 1.0
+            },
+            "doubleSided": false
+        });
+        match m.alpha {
+            AlphaClass::Opaque => {}
+            AlphaClass::Mask => {
+                mat["alphaMode"] = json!("MASK");
+                mat["alphaCutoff"] = json!(0.5);
+            }
+            AlphaClass::Blend => mat["alphaMode"] = json!("BLEND"),
+        }
+        materials.push(mat);
+    }
+
+    let mut meshes: Vec<Value> = Vec::new();
+    let mut nodes: Vec<Value> = Vec::new();
+    for c in &mesh.chunks {
+        let mut prims: Vec<Value> = Vec::new();
+        for g in &c.groups {
+            let n = g.quads();
+            let mut pos = Vec::with_capacity(n * 4 * 12);
+            let mut min = [f32::MAX; 3];
+            let mut max = [f32::MIN; 3];
+            for p in &g.positions {
+                for k in 0..3 {
+                    min[k] = min[k].min(p[k]);
+                    max[k] = max[k].max(p[k]);
+                }
+                for v in p {
+                    pos.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+            let mut nor = Vec::with_capacity(n * 4 * 12);
+            for q in &g.normals {
+                for _ in 0..4 {
+                    for v in q {
+                        nor.extend_from_slice(&v.to_le_bytes());
+                    }
+                }
+            }
+            let mut uv = Vec::with_capacity(n * 4 * 8);
+            for t in &g.uvs {
+                for v in t {
+                    uv.extend_from_slice(&v.to_le_bytes());
+                }
+            }
+            let mut idx = Vec::with_capacity(n * 24);
+            for i in 0..n as u32 {
+                let b = i * 4;
+                for k in [0, 1, 2, 0, 2, 3] {
+                    idx.extend_from_slice(&(b + k).to_le_bytes());
+                }
+            }
+            let pv = put(&mut bin, &pos, 34962)?;
+            let nv = put(&mut bin, &nor, 34962)?;
+            let uvv = put(&mut bin, &uv, 34962)?;
+            let iv = put(&mut bin, &idx, 34963)?;
+            let mut acc = |view: usize,
+                           count: usize,
+                           ty: &str,
+                           comp: u32,
+                           mm: Option<([f32; 3], [f32; 3])>| {
+                let mut a =
+                    json!({"bufferView": view, "componentType": comp, "count": count, "type": ty});
+                if let Some((lo, hi)) = mm {
+                    a["min"] = json!(lo);
+                    a["max"] = json!(hi);
+                }
+                accessors.push(a);
+                accessors.len() - 1
+            };
+            let pa = acc(pv, g.positions.len(), "VEC3", 5126, Some((min, max)));
+            let na = acc(nv, g.positions.len(), "VEC3", 5126, None);
+            let ua = acc(uvv, g.uvs.len(), "VEC2", 5126, None);
+            let ia = acc(iv, n * 6, "SCALAR", 5125, None);
+            prims.push(json!({
+                "attributes": {"POSITION": pa, "NORMAL": na, "TEXCOORD_0": ua},
+                "indices": ia,
+                "material": g.material,
+            }));
+        }
+        meshes.push(json!({"name": format!("chunk {},{}", c.cx, c.cz), "primitives": prims}));
+        nodes.push(json!({
+            "name": format!("chunk {},{}", c.cx, c.cz),
+            "mesh": meshes.len() - 1,
+            "translation": [c.cx as i64 * 16, 0, c.cz as i64 * 16],
+        }));
+    }
+    bin.flush()?;
+    drop(bin);
+    let mut doc = json!({
+        "asset": {"version": "2.0", "generator": "mc-unpack"},
+        "scene": 0,
+        "scenes": [{"name": mesh.name, "nodes": (0..nodes.len()).collect::<Vec<_>>()}],
+        "nodes": nodes,
+        "meshes": meshes,
+        "buffers": [{"uri": uri_encode(&bin_name), "byteLength": offset}],
+        "bufferViews": views,
+        "accessors": accessors,
+        "samplers": [{"magFilter": NEAREST, "minFilter": NEAREST, "wrapS": CLAMP_TO_EDGE, "wrapT": CLAMP_TO_EDGE}],
+        "materials": materials,
+        "textures": textures,
+        "images": images,
+    });
+    if let Some(s) = mesh.spawn {
+        doc["scenes"][0]["extras"] = json!({"spawn": s});
+    }
+    let path = out_dir.join(format!("{name}.gltf"));
+    fs::write(&path, serde_json::to_vec(&doc)?)?;
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

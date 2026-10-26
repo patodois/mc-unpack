@@ -37,6 +37,7 @@ pub mod text;
 pub mod texture;
 pub mod tint;
 pub mod version;
+pub mod world;
 
 #[cfg(feature = "bridge")]
 pub mod bridge;
