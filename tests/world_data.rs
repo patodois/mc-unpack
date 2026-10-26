@@ -87,6 +87,52 @@ fn real_26_3_regions_load_without_failures_and_account_for_every_block() {
     }
 }
 
+/// A 26.x palette entry that is only a name is the block's default state, which is in the game's
+/// code. No jar says it, so those blocks are left out and said so; none is drawn as "the first state
+/// of its blockstate" (a bare `oak_log` is not `axis=x`, a bare `grass_block` not `snowy=false`).
+#[test]
+fn bare_palette_names_are_left_out_unless_every_state_looks_alike() {
+    let mut seen_grass = 0;
+    for (w, a) in saves!("26.3") {
+        for (rx, rz) in w.regions("overworld").unwrap() {
+            let (_, r) = build(&a, &w, &BuildOptions::new(Window::region(rx, rz))).unwrap();
+            let left = |n: &str| r.left_out.iter().find(|l| l.name == n);
+            // the blocks whose states differ: all counted as left out for the one reason
+            for n in [
+                "minecraft:grass_block",
+                "minecraft:oak_log",
+                "minecraft:oak_stairs",
+                "minecraft:oak_slab",
+                "minecraft:wall_torch",
+                "minecraft:stripped_oak_log",
+            ] {
+                if let Some(l) = left(n) {
+                    assert!(
+                        l.reason.contains("default state is in the game's code"),
+                        "{n}: {}",
+                        l.reason
+                    );
+                    assert!(l.blocks > 0);
+                }
+                // and none was baked from "no state given"
+                assert!(
+                    !r.bake_notes
+                        .iter()
+                        .any(|b| b.block == n && b.note.contains("no state given")),
+                    "{n} was drawn from a bare name: {:?}",
+                    r.bake_notes
+                );
+            }
+            if let Some(g) = left("minecraft:grass_block") {
+                seen_grass += g.blocks;
+            }
+            // the blocks that carry their properties are still drawn
+            assert!(r.blocks_drawn > 0 || r.blocks == 0);
+        }
+    }
+    assert!(seen_grass > 0, "no bare grass found in the 26.3 saves");
+}
+
 /// The game stores, for every finished chunk, the height of the highest block that is not air in
 /// each column (`Heightmaps.WORLD_SURFACE`). It is an independent record of where the blocks are,
 /// written by the game and not by this crate, so the chunks it decodes must agree with it for every

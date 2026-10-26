@@ -152,7 +152,7 @@ pub fn to_blocks(
         let ids: Vec<u16> = s
             .palette
             .iter()
-            .map(|p| table.resolve(&p.name, &p.props))
+            .map(|p| table.resolve_entry(p))
             .collect::<Result<_>>()?;
         secs[i] = match &s.blocks {
             Indices::Uniform => Sec::Uniform(ids[0]),

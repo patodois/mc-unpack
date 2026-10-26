@@ -1272,6 +1272,74 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_name_is_the_default_state_which_the_data_does_not_give() {
+        let mut c = ChunkSpec::new(0, 0);
+        // bare names: a block whose states look different (never "the first one": the slab is
+        // not `type=bottom` and the grass is not `snowy=false`), one with state-dependent parts, and
+        // two where no state would look different
+        c.set_bare(1, 64, 1, "minecraft:oak_slab");
+        c.set_bare(3, 64, 1, "minecraft:grass_block");
+        c.set_bare(5, 64, 1, "minecraft:fence");
+        c.set_bare(7, 64, 1, "minecraft:stone");
+        c.set_bare(9, 64, 1, "minecraft:twin");
+        // the same blocks with their properties given are drawn
+        c.set(1, 64, 5, "minecraft:oak_slab", &[("type", "top")]);
+        c.set(3, 64, 5, "minecraft:grass_block", &[("snowy", "false")]);
+        let (m, r) = one_chunk(&c);
+        assert_eq!(r.blocks, 7);
+        assert_eq!(r.blocks_drawn, 4, "{:?}", r.left_out);
+        assert_eq!(m.quad_count(), 4 * 6);
+        let by = |n: &str| {
+            r.left_out
+                .iter()
+                .find(|l| l.name == n)
+                .unwrap_or_else(|| panic!("{:?}", r.left_out))
+        };
+        for n in [
+            "minecraft:oak_slab",
+            "minecraft:grass_block",
+            "minecraft:fence",
+        ] {
+            assert_eq!(by(n).blocks, 1, "{n}");
+            assert!(
+                by(n).reason.contains("default state is in the game's code"),
+                "{}",
+                by(n).reason
+            );
+        }
+        assert!(by("minecraft:oak_slab")
+            .reason
+            .contains("3 states that bake to 3 different results"));
+        assert!(by("minecraft:fence").reason.contains("depend on the state"));
+        assert!(r
+            .left_out
+            .iter()
+            .all(|l| l.name != "minecraft:stone" && l.name != "minecraft:twin"));
+        let text = r.lines().join("\n");
+        assert!(
+            text.contains("default state is in the game's code"),
+            "{text}"
+        );
+        // nothing was drawn at the bare slab or the bare grass: no quad has a vertex over them
+        let near = |x: f32, z: f32| {
+            m.chunks[0]
+                .groups
+                .iter()
+                .flat_map(|g| g.positions.iter())
+                .any(|p| {
+                    p[0] >= x
+                        && p[0] <= x + 1.0
+                        && p[2] >= z
+                        && p[2] <= z + 1.0
+                        && p[1] >= 64.0
+                        && p[1] < 65.0
+                })
+        };
+        assert!(!near(1.0, 1.0) && !near(3.0, 1.0) && !near(5.0, 1.0));
+        assert!(near(1.0, 5.0) && near(3.0, 5.0) && near(7.0, 1.0) && near(9.0, 1.0));
+    }
+
+    #[test]
     fn what_the_bake_said_is_counted_in_the_report() {
         let mut c = ChunkSpec::new(0, 0);
         // no state given for a block that has two: the first is used

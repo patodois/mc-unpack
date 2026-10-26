@@ -16,7 +16,7 @@ use crate::jar::testjar::{png, JarBuilder};
 /// A jar (1.21.4 and later layout: it has item definitions; with biome data and colormaps) holding:
 /// `stone`, `glass` (partly transparent), `grass_block` (tinted, and its item definition says grass),
 /// `oak_leaves` and `birch_leaves` (tinted; no item definition says what colours them), `oak_slab` (bottom, top, double), `water` and `chest` (no geometry),
-/// `fence` (multipart), `many` (240 quads, none culled), and the biomes `plains`, `desert`, `swamp`
+/// `fence` (multipart), `twin` (two states, one look), `many` (240 quads, none culled), and the biomes `plains`, `desert`, `swamp`
 pub fn world_jar() -> Assets {
     let tex = |c: u8| png(16, 16, move |_, _| [c, c, c, 255]);
     let glass = png(16, 16, |x, _| {
@@ -104,7 +104,7 @@ pub fn world_jar() -> Assets {
         .add("assets/minecraft/models/block/many.json", many)
         .add("assets/minecraft/blockstates/stone.json", r#"{"variants":{"":{"model":"block/stone"}}}"#)
         .add("assets/minecraft/blockstates/glass.json", r#"{"variants":{"":{"model":"block/glass"}}}"#)
-        .add("assets/minecraft/blockstates/grass_block.json", r#"{"variants":{"snowy=false":{"model":"block/grass_block"},"snowy=true":{"model":"block/grass_block"}}}"#)
+        .add("assets/minecraft/blockstates/grass_block.json", r#"{"variants":{"snowy=false":{"model":"block/grass_block"},"snowy=true":{"model":"block/grass_block_snow"}}}"#)
         .add("assets/minecraft/blockstates/oak_leaves.json", r#"{"variants":{"":{"model":"block/oak_leaves"}}}"#)
         .add("assets/minecraft/blockstates/birch_leaves.json", r#"{"variants":{"":{"model":"block/oak_leaves"}}}"#)
         .add(
@@ -120,6 +120,11 @@ pub fn world_jar() -> Assets {
         .add("assets/minecraft/models/block/stone.json", cube(false, "block/stone"))
         .add("assets/minecraft/models/block/glass.json", cube(false, "block/glass"))
         .add("assets/minecraft/models/block/grass_block.json", cube(true, "block/grass_block"))
+        .add("assets/minecraft/models/block/grass_block_snow.json", cube(true, "block/glass"))
+        .add(
+            "assets/minecraft/blockstates/twin.json",
+            r#"{"variants":{"axis=x":{"model":"block/stone"},"axis=y":{"model":"block/stone"}}}"#,
+        )
         .add("assets/minecraft/models/block/oak_leaves.json", cube(true, "block/leaf"))
         .add("assets/minecraft/models/block/slab_bottom.json", slab(0, 8))
         .add("assets/minecraft/models/block/slab_top.json", slab(8, 16))
@@ -152,6 +157,9 @@ pub fn world_jar() -> Assets {
     Assets::from_jar(jar).unwrap()
 }
 
+/// A test palette entry: name, properties, written as a bare name
+type PalKey = (String, Vec<(String, String)>, bool);
+
 /// World block coordinates
 pub type Pos = (i32, i32, i32);
 
@@ -173,6 +181,8 @@ pub struct ChunkSpec {
     /// Biome of one 4 x 4 x 4 cell: (section y, cell index `cy*16 + cz*4 + cx`) to name
     pub biome_cells: BTreeMap<(i32, usize), String>,
     pub status: Option<String>,
+    /// Blocks written as a bare name (a 26.x palette entry that is only the name: the default state)
+    pub bare: std::collections::BTreeSet<Pos>,
     /// The 1.13 to 1.15 layout (`Level`, `Sections`, spanning longs)
     pub old_layout: bool,
     /// Extra sections to write even with nothing in them (so the chunk reaches them)
@@ -199,6 +209,13 @@ impl ChunkSpec {
                     .collect(),
             ),
         );
+        self
+    }
+
+    /// A block written as a bare palette name, as a 26.x save writes the default state
+    pub fn set_bare(&mut self, x: i32, y: i32, z: i32, name: &str) -> &mut Self {
+        self.set(x, y, z, name, &[]);
+        self.bare.insert((x, y, z));
         self
     }
 
@@ -229,11 +246,10 @@ impl ChunkSpec {
         let mut sections = Vec::new();
         for (sy, blocks) in &secs {
             // palette: air first, then in order of appearance
-            let mut pal: Vec<(String, Vec<(String, String)>)> =
-                vec![("minecraft:air".into(), vec![])];
+            let mut pal: Vec<PalKey> = vec![("minecraft:air".into(), vec![], true)];
             let mut idx = vec![0u16; 4096];
             for ((x, y, z), (n, p)) in blocks {
-                let key = (n.clone(), p.clone());
+                let key = (n.clone(), p.clone(), self.bare.contains(&(*x, *y, *z)));
                 let i = pal.iter().position(|e| *e == key).unwrap_or_else(|| {
                     pal.push(key);
                     pal.len() - 1
@@ -243,10 +259,14 @@ impl ChunkSpec {
             }
             let palette = Tag::List(
                 pal.iter()
-                    .map(|(n, p)| {
+                    .map(|(n, p, bare)| {
                         let props: Vec<(&str, &str)> =
                             p.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-                        entry(n, &props)
+                        if *bare && !self.old_layout {
+                            compound(vec![("", string(n))])
+                        } else {
+                            entry(n, &props)
+                        }
                     })
                     .collect(),
             );

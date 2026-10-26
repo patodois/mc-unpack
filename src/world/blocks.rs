@@ -45,6 +45,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use serde_json::Value;
 
+use super::chunk::PaletteEntry;
 use crate::assets::{Assets, LeftOut};
 use crate::blockstate::State;
 use crate::model::Dir;
@@ -161,6 +162,8 @@ pub struct StateTable<'a> {
     /// model's quads, and a hostile palette could ask for many)
     state_quads: usize,
     max_state_quads: usize,
+    /// Per block name: why a bare palette name cannot be drawn (`None`: it can)
+    bare: HashMap<String, Option<String>>,
 }
 
 /// Quads (about 110 bytes each) all the block states of one load may hold. The jars here need under
@@ -193,6 +196,7 @@ impl<'a> StateTable<'a> {
             known,
             state_quads: 0,
             max_state_quads: MAX_STATE_QUADS,
+            bare: HashMap::new(),
         }
     }
 
@@ -206,16 +210,112 @@ impl<'a> StateTable<'a> {
         self.assets
     }
 
+    /// The id of a palette entry of a save (see [`Self::resolve`], and `bare` below)
+    pub fn resolve_entry(&mut self, e: &PaletteEntry) -> Result<u16> {
+        self.resolve_inner(&e.name, &e.props, e.bare)
+    }
+
+    /// The id of a block state given with all its properties, baking it the first time it is met
+    pub fn resolve(&mut self, name: &str, props: &[(String, String)]) -> Result<u16> {
+        self.resolve_inner(name, props, false)
+    }
+
+    /// Why a bare palette name of this block cannot be drawn: `None` when it can, because every
+    /// state its blockstate has bakes to the same quads (or it has one state), so which one the
+    /// game's default is does not matter
+    fn bare_ambiguity(&mut self, local: &str) -> Option<String> {
+        if let Some(r) = self.bare.get(local) {
+            return r.clone();
+        }
+        let r = self.compute_bare_ambiguity(local);
+        self.bare.insert(local.to_string(), r.clone());
+        r
+    }
+
+    fn compute_bare_ambiguity(&self, local: &str) -> Option<String> {
+        const MAX_KEYS: usize = 1024;
+        let Ok(bs) = self.assets.blockstate(local) else {
+            return Some("its blockstate cannot be read".into());
+        };
+        if bs.is_multipart() {
+            let conditional = bs.multipart.iter().filter(|p| p.when.is_some()).count();
+            return (conditional > 0).then(|| {
+                format!("its blockstate has {conditional} part(s) that depend on the state")
+            });
+        }
+        if bs.variants.len() <= 1 {
+            return None;
+        }
+        if bs.variants.len() > MAX_KEYS {
+            return Some(format!("its blockstate has {} states", bs.variants.len()));
+        }
+        let mut results: Vec<Vec<crate::bake::Quad>> = Vec::new();
+        for (key, _) in &bs.variants {
+            let quads = State::parse(key)
+                .and_then(|st| self.assets.bake_block(local, &st))
+                .map(|b| b.quads().cloned().collect::<Vec<_>>());
+            match quads {
+                Ok(q) => {
+                    if !results.contains(&q) {
+                        results.push(q);
+                    }
+                }
+                Err(e) => return Some(format!("its state `{key}` does not bake: {e:#}")),
+            }
+        }
+        (results.len() > 1).then(|| {
+            format!(
+                "its blockstate has {} states that bake to {} different results",
+                bs.variants.len(),
+                results.len()
+            )
+        })
+    }
+
     /// The id of a block state, baking it the first time it is met.
     ///
     /// States are keyed by what the blockstate file can tell apart: the properties it mentions, and
     /// `waterlogged` (which the report counts). A palette that adds properties the file does not
     /// mention, or any number of them, is the same state, so it cannot fill the table.
-    pub fn resolve(&mut self, name: &str, props: &[(String, String)]) -> Result<u16> {
+    ///
+    /// `bare` is a 26.x palette entry that is only a name: the block's default state, which is in
+    /// the game's code. Such an entry is drawn only when no state of the block would look different;
+    /// otherwise it is left out, with the reason.
+    fn resolve_inner(&mut self, name: &str, props: &[(String, String)], bare: bool) -> Result<u16> {
         let local = name.strip_prefix("minecraft:");
         if let Some(l) = local {
             if air_like(l) {
                 return Ok(AIR);
+            }
+        }
+        if bare {
+            if let Some(l) = local.filter(|l| self.known.contains(*l)) {
+                if let Some(why) = self.bare_ambiguity(l) {
+                    let key = (name.to_string(), ";bare".to_string());
+                    if let Some(&id) = self.index.get(&key) {
+                        return Ok(id);
+                    }
+                    if self.states.len() >= MAX_STATES {
+                        anyhow::bail!(
+                            "the world uses more than {MAX_STATES} distinct block states"
+                        );
+                    }
+                    let id = self.states.len() as u16;
+                    self.states.push(StateEntry {
+                        name: Arc::from(name),
+                        props: "(bare name)".into(),
+                        quads: Vec::new(),
+                        covers: [false; 6],
+                        tint: None,
+                        fate: Fate::LeftOut(format!(
+                            "default state is in the game's code: the palette gives only the name, and {why}, so which state the game means is not in the data"
+                        )),
+                        waterlogged: false,
+                        notes: Vec::new(),
+                    });
+                    self.index.insert(key, id);
+                    return Ok(id);
+                }
             }
         }
         let waterlogged = props.iter().any(|(k, v)| k == "waterlogged" && v == "true");

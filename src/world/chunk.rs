@@ -23,9 +23,13 @@
 //! and not read.
 //!
 //! The 26.x writer, as found in the saves of this machine, writes a palette entry as a plain string
-//! (a block with no properties, when every entry of the list is one), as `{"": "minecraft:name"}`
-//! (the same, beside entries that have properties), or as `{id, properties}`; 1.13 to 1.21 write
-//! `{Name, Properties}`. All four are read.
+//! (when every entry of the list is only a name), as `{"": "minecraft:name"}` (the same, beside entries
+//! that have properties), or as `{id, properties}`; 1.13 to 1.21 write `{Name, Properties}`. All are
+//! read. **In the 26.x shapes an entry that is only a name is the block's default state**, not "a block
+//! with no properties": the same save holds `oak_log` bare and `oak_log` with `axis` set, and stairs
+//! bare beside stairs with all their properties. Which state is the default is in the game's code, so
+//! [`PaletteEntry::bare`] says it and the block table decides what to do (see `world::blocks`). A
+//! 1.13 to 1.21 `{Name}` with no `Properties` is a block that has none.
 
 use std::collections::BTreeMap;
 
@@ -51,6 +55,11 @@ pub struct PaletteEntry {
     pub name: String,
     /// Sorted by property name
     pub props: Vec<(String, String)>,
+    /// The entry is only a name in the 26.x shapes (a string, `{"": name}`, or `{id}` with no
+    /// `properties`). There it means **the block's default state**, which is in the game's code and
+    /// not in the data. The 1.13 to 1.21 shape (`{Name}` with no `Properties`) means a block that has
+    /// none, and is not bare.
+    pub bare: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -165,16 +174,17 @@ pub fn unpack(data: &[i64], bits: usize, count: usize) -> anyhow::Result<Vec<u16
 }
 
 fn palette_entry(t: &Tag) -> anyhow::Result<PaletteEntry> {
-    let (name, raw_props) = match t {
-        Tag::String(s) => (s.as_str(), None),
+    let (name, raw_props, bare_shape) = match t {
+        Tag::String(s) => (s.as_str(), None, true),
         Tag::Compound(_) => {
-            let name = t
-                .get("Name")
-                .or_else(|| t.get("id"))
-                .or_else(|| t.get(""))
-                .and_then(Tag::as_str)
+            // `Name` is the 1.13 to 1.21 key; `id` and the empty key are 26.x's
+            let old_name = t.get("Name").and_then(Tag::as_str);
+            let name = old_name
+                .or_else(|| t.get("id").and_then(Tag::as_str))
+                .or_else(|| t.get("").and_then(Tag::as_str))
                 .context("a palette entry with no name")?;
-            (name, t.get("Properties").or_else(|| t.get("properties")))
+            let p = t.get("Properties").or_else(|| t.get("properties"));
+            (name, p, old_name.is_none() && p.is_none())
         }
         other => bail!("a palette entry of NBT type {}", other.type_id()),
     };
@@ -202,6 +212,7 @@ fn palette_entry(t: &Tag) -> anyhow::Result<PaletteEntry> {
     Ok(PaletteEntry {
         name: name.to_string(),
         props,
+        bare: bare_shape,
     })
 }
 
@@ -536,11 +547,15 @@ pub mod tests {
         assert_eq!(c.sections[0].blocks, Indices::Uniform);
         let s = &c.sections[1];
         assert_eq!(s.palette[0].name, "minecraft:air");
+        // `{"": name}` is a bare name; `{id, properties}` and `{Name}` are not
+        assert!(s.palette[0].bare);
+        assert!(!s.palette[1].bare && !s.palette[2].bare);
         assert_eq!(
             s.palette[1],
             PaletteEntry {
                 name: "minecraft:oak_log".into(),
-                props: vec![("axis".into(), "x".into())]
+                props: vec![("axis".into(), "x".into())],
+                bare: false
             }
         );
         match &s.blocks {
@@ -627,6 +642,25 @@ pub mod tests {
         ]))
         .unwrap_err();
         assert!(e.to_string().contains("not a string"));
+    }
+
+    #[test]
+    fn a_bare_name_is_only_a_name_in_the_26_x_shapes() {
+        let bare = |t: &Tag| palette_entry(t).unwrap().bare;
+        assert!(bare(&string("minecraft:oak_log")));
+        assert!(bare(&compound(vec![("", string("minecraft:oak_log"))])));
+        assert!(bare(&compound(vec![("id", string("minecraft:oak_log"))])));
+        // with properties it is a state, even an empty set of them
+        assert!(!bare(&compound(vec![
+            ("id", string("minecraft:oak_log")),
+            ("properties", compound(vec![("axis", string("y"))]))
+        ])));
+        assert!(!bare(&compound(vec![
+            ("id", string("minecraft:stone")),
+            ("properties", compound(vec![]))
+        ])));
+        // 1.13 to 1.21: a block with no properties says only its name; not the default of anything
+        assert!(!bare(&compound(vec![("Name", string("minecraft:stone"))])));
     }
 
     #[test]

@@ -300,7 +300,7 @@ jar has no blockstate for (a 26.3 save of the village here, read with the 1.21.1
 
 | Save made by | What a chunk is | Read | Biome tint (grass only, see Tints) |
 |--------------|-----------------|------|------------------------------------|
-| 26.x | `sections[]`, `block_states`/`biomes` palettes; a palette entry is `"minecraft:air"`, `{"": name}` or `{id, properties}`; `dimensions/<ns>/<name>/region` | **yes, checked against real saves** (26.3: 3 saves, 4,405 finished chunks) | yes (item definitions say which blocks) |
+| 26.x | `sections[]`, `block_states`/`biomes` palettes; a palette entry is a **bare name** (`"minecraft:oak_log"`, `{"": name}` or `{id}`: the block's default state) or `{id, properties}`; `dimensions/<ns>/<name>/region` | **yes, for entries with their properties, checked against real saves** (26.3: 3 saves; the heightmap check covers where blocks are, 4,405 finished chunks, not which state they are in). **Bare names are left out** unless every state of the block looks alike, see Blocks | yes (item definitions say which blocks) |
 | 1.21.4 to 1.21.x | the same layout with `{Name, Properties}` entries | read by the same code; **no save of these versions exists on the author's machine**: synthetic chunks only | yes, where the jar has item definitions and biome data |
 | 1.18 to 1.21.3 | the same | the same: synthetic chunks only (jars of 1.19.2, 1.20.1, 1.21.1 are installed, no worlds) | **no**: no item definitions in the jar, so the data does not say which blocks |
 | 1.16 and 1.17 | `Level.Sections`, `Palette`/`BlockStates`; entries do not span longs; biomes are numbers | blocks only; synthetic chunks only | no (numeric biomes, and no item definitions) |
@@ -340,6 +340,20 @@ blockstate that lists weighted variants uses the first (the game picks by positi
 not mention ignores it. Block entities are their block's model and nothing else (no inventory, text or items): chests, banners,
 heads, shulker boxes and the like have none in the data and are left out and counted, like **fluids**: `water` and `lava` have an
 empty model (their shape, by level and flow, is code), so a lake is a hole and a waterlogged block is drawn without its water (counted).
+**Bare names (26.x).** A palette entry that is only a name is the block's *default state*, and the default is in the game's code. This
+crate does not guess it: a bare name is drawn only when **every state of the block's blockstate bakes to the same quads** (then it does
+not matter which one), and otherwise the blocks are left out with the reason "default state is in the game's code" and a count per
+block (on the 26.3 village here: 4,690 grass blocks, 121 oak logs, 53 oak stairs, 27 slabs, 33 fences, 16 stripped logs, 6 wall torches
+and a few more, a good part of the world). The jars were searched for anything that states a default, and nothing does: in 26.3 the
+structure templates (the 1,511 `.nbt` files of the jar) write every property of a block that has any, so
+`grass_block` is `{snowy: false}` in 276 of them (`abandoned_camp/camp/bamboo_jungle/campsite_bamboo_jungle_1.nbt`, for one) and
+`{snowy: true}` in 23 (`abandoned_camp/camp/snowy_taiga/campsite_snowy_taiga_1.nbt`), and their only bare entries are blocks with no properties;
+the worldgen JSON writes `{"Name": ...}` for "the default" and leaves the meaning to the game's code; the blockstates, item definitions,
+loot tables, tags, recipes and advancements list states or conditions, never a default (1.21.1 checked the same way). So `grass_block`
+and the rest stay out. One thing the saves do show, and this crate does not use: in a save a block appears both bare and with
+`axis` set (`oak_log`: bare 74 times, `axis=x` and `axis=z` explicit), which suggests the writer drops the default, so the bare one is
+neither of the written ones; that is an inference from the writer's habit, not a statement in the data.
+
 A block the jar has no blockstate for (another version's, a mod's) is listed as not in the jar. Air is not counted. What the bake said about the blocks that were drawn (a state chosen because none was given, variants a partial state fits, properties the blockstate does not mention, faces left out) is counted in the report, per block and note.
 
 **Tints.** A biome tint is applied **only where the jar's data says the block takes it**, and the data says it in one place (and that one is an inference: the item definitions are the item's tints, and this crate reads an item's `minecraft:grass` tint as the same-named block's; in 26.3 it is six items, `bush`, `fern`, `grass_block`, `large_fern`, `short_grass` and `tall_grass`, so sugar cane and potted ferns, which the game also tints, stay untinted here): a 26.x
@@ -450,7 +464,7 @@ materials; options are the checker's, `--help` lists them; put `--mc-version` be
 **no errors and no warnings** (exit status 0); the same assets in bridge-testbed give a 1.000 x 1.000 x 1.000 m box for
 `block/stone`, identical to the Hytale block it is compared with (AABB `[-0.5, 0, -0.5]` to `[0.5, 1, 0.5]`).
 
-Tests: `cargo test` runs 230 unit tests on tiny synthetic jars and saves built in the tests (no game data anywhere; they include a zip
+Tests: `cargo test` runs 232 unit tests on tiny synthetic jars and saves built in the tests (no game data anywhere; they include a zip
 that lies about its size, PNGs over the limits, NBT with lengths past the file, region tables that point anywhere, and regions
 written chunk by chunk in the 1.13 and in the current layout) and 24 real-data tests
 in `tests/game_data.rs` that read the installed jars and skip, saying so, where a version is not installed. The real-data
@@ -459,11 +473,11 @@ their tall side to the east in 1.12.2, 1.21.1 and 26.3; `uvlock` keeps planks al
 leans away from its wall (which fixes the sign of element rotation); pistons face where their state says; and `check` has
 no failures on every installed version.
 
-`tests/world_data.rs` has 8 more that read the saves on the machine (read only) and skip where there is none of the version:
-every region of the 26.3 saves loads with no failed chunk and every block is accounted for as drawn, left out or not in the jar;
+`tests/world_data.rs` has 9 more that read the saves on the machine (read only) and skip where there is none of the version:
+bare palette names are left out (never drawn as the first state of a blockstate); every region of the 26.3 saves loads with no failed chunk and every block is accounted for as drawn, left out or not in the jar;
 **the blocks of 4,405 finished chunks agree, column by column, with the `WORLD_SURFACE` heightmap the game itself saved** (an
 independent record of where the blocks are, which checks the bit packing, the section order, negative heights and the x/z order at
-once); the blocks that get a biome tint are exactly the ones whose 26.x item definition has a grass tint; a 1.12.2 save is reported as numeric ids and a 1.7.10 one as having no
+once: it says where blocks are, not which state they are in); the blocks that get a biome tint are exactly the ones whose 26.x item definition has a grass tint; a 1.12.2 save is reported as numeric ids and a 1.7.10 one as having no
 models; every region the provider lists is a scene the bridge's checker accepts (`check-conformance --with-worlds --kind level`: 12 of 12
 clean with rewrite-bridge 0.2.2); and damaged copies of a real region and of a real chunk never panic. The fuzz tests
 (`src/world/fuzz.rs`) flip, cut, splice and set to extremes the bytes of NBT, chunks, the three compressions, region files, whole
