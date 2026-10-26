@@ -257,8 +257,8 @@ fn lz4_block_stream(data: &[u8], max_out: usize) -> Result<Vec<u8>> {
             0x20 => lz4_block(body, &mut out, dlen)?,
             other => bail!("LZ4 block with an unknown method {other:#x}"),
         }
-        // the writer stores the checksum of the block's bytes with its own seed; the library masks
-        // it to 28 bits on one side, so both readings are accepted
+        // the writer stores the xxHash32 of the block's bytes, seed 0x9747B28C, masked to its low 28
+        // bits (lz4-java's `Checksum` view of the hash does that); the whole 32 bits are accepted too
         let sum = xxh32(&out[at..], LZ4_SEED);
         if sum != check && (sum & 0x0FFF_FFFF) != check {
             bail!("LZ4 block fails its checksum");
@@ -294,7 +294,7 @@ pub mod tests {
             out.push(0x10 | 9);
             out.extend_from_slice(&(chunk.len() as i32).to_le_bytes());
             out.extend_from_slice(&(chunk.len() as i32).to_le_bytes());
-            out.extend_from_slice(&xxh32(chunk, LZ4_SEED).to_le_bytes());
+            out.extend_from_slice(&(xxh32(chunk, LZ4_SEED) & 0x0FFF_FFFF).to_le_bytes());
             out.extend_from_slice(chunk);
         }
         out.extend_from_slice(LZ4_MAGIC);
@@ -344,7 +344,7 @@ pub mod tests {
         s.push(0x20 | 9);
         s.extend_from_slice(&(block.len() as i32).to_le_bytes());
         s.extend_from_slice(&412i32.to_le_bytes());
-        s.extend_from_slice(&xxh32(&want, LZ4_SEED).to_le_bytes());
+        s.extend_from_slice(&(xxh32(&want, LZ4_SEED) & 0x0FFF_FFFF).to_le_bytes());
         s.extend_from_slice(&block);
         s.extend_from_slice(LZ4_MAGIC);
         s.push(0x10 | 9);
@@ -395,6 +395,20 @@ pub mod tests {
         let s = lz4_stored(&data);
         assert_eq!(decompress(Compression::Lz4, &s, 3000).unwrap(), data);
         assert!(decompress(Compression::Lz4, &s, 2999).is_err());
+    }
+
+    #[test]
+    fn the_checksum_is_read_masked_or_whole() {
+        let data = b"hello world, hello world".to_vec();
+        let mut s = lz4_stored(&data);
+        // the stored one is the low 28 bits; write the whole 32 and it still reads
+        let full = xxh32(&data, LZ4_SEED);
+        assert!(
+            full > 0x0FFF_FFFF,
+            "pick data whose hash has high bits for this test"
+        );
+        s[17..21].copy_from_slice(&full.to_le_bytes());
+        assert_eq!(decompress(Compression::Lz4, &s, 100).unwrap(), data);
     }
 
     #[test]

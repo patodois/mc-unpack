@@ -102,13 +102,13 @@ enum Cmd {
     Worlds,
     /// Say what a save folder holds: version, dimensions, regions and chunks, and which jar reads it
     WorldInfo {
-        /// A save folder (the one with level.dat in it)
+        /// A save folder (the one with level.dat in it), or a name `mc-unpack worlds` lists
         save: PathBuf,
     },
     /// Export a part of a save as glTF: the blocks of a region (and `--radius` regions around it), baked
     /// from the jar's models, with hidden faces dropped and biome tints. Prints what was left out and why.
     World {
-        /// A save folder (the one with level.dat in it)
+        /// A save folder (the one with level.dat in it), or a name `mc-unpack worlds` lists
         save: PathBuf,
         /// The region file's coordinates, `x,z` (`r.x.z.mca`)
         #[arg(long, value_name = "X,Z", allow_hyphen_values = true)]
@@ -778,10 +778,23 @@ fn cmd_worlds() -> Result<()> {
     Ok(())
 }
 
+/// A save folder, or the label `mc-unpack worlds` gives a save when no such folder exists
+fn open_save(save: &Path) -> Result<mc_unpack::world::save::World> {
+    use mc_unpack::world::save::{discover_saves, World};
+    if !save.exists() {
+        if let Some(s) = discover_saves()
+            .into_iter()
+            .find(|s| Path::new(&s.label) == save)
+        {
+            return World::open(&s.path);
+        }
+    }
+    World::open(save)
+}
+
 fn cmd_world_info(cli: &Cli, save: &Path) -> Result<()> {
     use mc_unpack::world::region::Region;
-    use mc_unpack::world::save::World;
-    let w = World::open(save)?;
+    let w = open_save(save)?;
     let lv = &w.level;
     println!("save: {}", esc(&w.name()));
     println!(
@@ -842,8 +855,7 @@ fn cmd_world(
     include_unfinished: bool,
 ) -> Result<()> {
     use mc_unpack::world::mesher::{build, BuildOptions, Window};
-    use mc_unpack::world::save::World;
-    let w = World::open(save)?;
+    let w = open_save(save)?;
     let assets = assets_for_world(cli, &w)?;
     let r = parse_ints(region, 2, "--region")?;
     let mut win = Window::region(r[0], r[1]);

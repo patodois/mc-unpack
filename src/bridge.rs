@@ -15,6 +15,13 @@
 //! game's own default state is in code); for a multipart block that needs properties, the first
 //! state its own conditions describe. A property the file does not mention is ignored.
 //!
+//! # Worlds
+//!
+//! With saves given to the provider ([`Minecraft::with_saves`], [`Minecraft::with_discovered_saves`]),
+//! `list` also offers the regions of the saves as `Level` assets, `world/<save>/<x>,<z>`, and
+//! `load_scene` returns one as a [`Scene`] with a model per chunk column; see
+//! [`crate::world::scene`] for the ids and the scene, and the README for what is left out.
+//!
 //! # Space
 //!
 //! 1 block = 1 m, +Y up, right-handed, counter-clockwise front faces, sRGB textures. **Axes are the

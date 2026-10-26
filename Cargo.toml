@@ -2,7 +2,7 @@
 name = "mc-unpack"
 version = "0.1.0"
 edition = "2021"
-description = "Reader for the block and item models and textures in your own Minecraft Java Edition client jar, with a rewrite-bridge provider (unofficial, for Minecraft)"
+description = "Reader for the block and item models and textures in your own Minecraft Java Edition client jar, and for your world saves, with a rewrite-bridge provider (unofficial, for Minecraft)"
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/patodois/mc-unpack"
