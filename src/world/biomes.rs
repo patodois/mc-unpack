@@ -1,5 +1,5 @@
-//! Biome names to the colours the colormaps give them, from the jar's own biome data (jars from 1.19
-//! on; before that biomes were in code and there is nothing to read).
+//! Biome names to the colours the colormaps give them, from the jar's own biome data (1.20.1 and later jars have
+//! it; the 1.19.2 jar here has none, and before that biomes were in code, so there is nothing to read).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 

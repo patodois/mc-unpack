@@ -551,7 +551,7 @@ pub fn build(
     if assets.biome_names().is_empty() {
         report
             .notes
-            .push("this jar has no biome data (before 1.19), so nothing is tinted by biome".into());
+            .push("this jar has no biome data (`data/minecraft/worldgen/biome`: the 1.19.2 jar here has none, 1.20.1 and later do), so nothing is tinted by biome".into());
     }
     let mesh = WorldMesh {
         name: world.name(),

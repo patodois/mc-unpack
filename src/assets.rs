@@ -641,7 +641,7 @@ impl Assets {
         Ok(c)
     }
 
-    /// The names of the biomes the jar's data describes (jars from 1.19 on; earlier biomes are code)
+    /// The names of the biomes the jar's data describes (1.20.1 and later jars have them; the 1.19.2 jar on the author's machine has none, and before that biomes were code)
     pub fn biome_names(&self) -> Vec<String> {
         let prefix = "data/minecraft/worldgen/biome/";
         self.jar

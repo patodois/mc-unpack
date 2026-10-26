@@ -5,7 +5,7 @@
 [![rewrite-bridge on crates.io](https://img.shields.io/crates/v/rewrite-bridge.svg?label=rewrite-bridge)](https://crates.io/crates/rewrite-bridge)
 
 A small Rust reader, **for Minecraft: Java Edition**, of the block models, item models and textures inside the client jar
-of a copy you already own:
+of a copy you already own, and of the world saves you made with it:
 
 - `assets/minecraft/blockstates/*.json` and `models/**.json`: parent inheritance, `#texture` variables, elements (box
   corners, rotation with `rescale`, per-face UV, face rotation, `cullface`, `tintindex`), variants and multipart, and a
@@ -15,7 +15,9 @@ of a copy you already own:
 - item definitions (`assets/minecraft/items/*.json`, 1.21.4 and later) and the tints they carry;
 - the biome colormaps and the lookup the game does in them;
 - a [rewrite-bridge](https://github.com/patodois/rewrite-bridge) `Provider`, so other game rewrites can load Minecraft
-  blocks and items next to their own assets, and a glTF 2.0 exporter.
+  blocks and items next to their own assets, and a glTF 2.0 exporter;
+- **your own worlds** (`saves/<name>`, 1.13 and later): `level.dat`, the region files and their chunks, turned into a scene of
+  the jar's baked blocks with hidden faces dropped and biome tints, see [Worlds](#worlds).
 
 It exists because the Rust crate for this, `minecraft-assets`, has not been touched since 2022 and stops at 1.18-era
 formats.
@@ -44,6 +46,9 @@ its data, is left out and listed under [What is left out](#what-is-left-out).
   `MC_UNPACK_PRISM_DIR` and `MC_UNPACK_MINECRAFT_DIR` replace the two launcher folders. Only the macOS Prism layout has been
   tried by the author; the other paths are the launchers' documented defaults. A modded profile's jar (Fabric, Forge) holds no
   assets and is refused with that message.
+- **For worlds, a save folder** of your own, from a launcher you installed the game with. Looked for, read only, in Prism's
+  `instances/*/minecraft/saves` (and `.minecraft/saves`), the vanilla launcher's `saves`, and the folders in `MC_UNPACK_SAVES`
+  (separated like `PATH`), or give the folder to `mc-unpack world`.
 - **Rust**, stable (edition 2021; written with 1.99; 1.88, the version `Cargo.toml` asks for, was checked with and without the `bridge` feature, and CI repeats that). A release build takes about 10 seconds with `-j 4`, plus the download of
   the dependencies.
 - **Disk and memory.** The jar is never extracted: the zip directory (5,000 to 15,000 entries, most of them classes) is read
@@ -100,6 +105,9 @@ mc-unpack texture block/water_still --frames -o out/   # every frame of an anima
 mc-unpack tint grass --biome plains         # the colormap lookup: #91bd59
 mc-unpack tint foliage --temperature 0.8 --downfall 0.4
 mc-unpack inspect block/oak_stairs          # which state was used, what was ignored, every note, what was left out
+mc-unpack worlds                            # the saves found in the launchers' folders, and the version each was made by
+mc-unpack world-info "<save folder>"        # version, dimensions, regions, chunks, and which jar reads it
+mc-unpack world "<save folder>" --region 0,0 -o out/    # the blocks of r.0.0.mca as glTF (`--radius`, `--chunks`, `--y` narrow or widen it)
 mc-unpack check                             # parse and bake everything in every jar found
 mc-unpack check-bridge                      # load everything through the Provider
 mc-unpack check-conformance --filter stairs # the bridge's conformance checker
@@ -221,7 +229,7 @@ code), so nothing is coloured unless you say so. The jar's own data helps in thr
 
 - the colormaps (`grass.png`, `foliage.png`, `dry_foliage.png`), with the game's lookup: clamp temperature and downfall to
   0..1, multiply downfall by temperature, take pixel `(1 - temperature) * 255`, `(1 - downfall) * 255`, truncated;
-- biomes (`data/minecraft/worldgen/biome`, jars from 1.19): temperature, downfall and colour overrides, so `--tint
+- biomes (`data/minecraft/worldgen/biome`, in the 1.20.1 jar and later; the 1.19.2 jar on the author's machine has none): temperature, downfall and colour overrides, so `--tint
   0=grass@plains` needs no number from this crate. A biome's `grass_color_modifier` (swamp, dark forest) and
   `temperature_modifier` (frozen) are applied by the game's code and are reported, not applied;
 - 26.x item definitions, which carry their own tints (oak leaves `#48b518`, grass block: the grass colormap at 0.5 / 1.0).
@@ -250,6 +258,8 @@ let sword = mc.load("item/diamond_sword")?;
 let all = mc.list("stairs")?;                                     // only what draws something
 ```
 
+A provider can also give worlds as scenes: see [Worlds](#worlds) (`with_saves`, ids `world/<save>/<x>,<z>`, `load_scene`).
+
 `with_tints(TintSet)` colours tint indices, `with_frame(n)` picks a frame of animated textures. `Minecraft::open` fails for a
 jar without JSON models (1.7.10 and earlier); the readers in `Assets` still give its textures.
 
@@ -275,6 +285,95 @@ some: 1,090 for 1.12.2, 2,465 for 1.20.1, 2,786 for 26.3. Block entities and the
 when listing, so one over the limits of a bake, or with a part that fails, is left out of the list (a failed part is printed
 as an error by `list`). `Model::name` and `AssetInfo::name` carry the state text exactly as the jar writes it: a program
 that prints them should escape control characters (the command line does).
+
+## Worlds
+
+`mc-unpack world "<save folder>" --region x,z [--radius n] [--chunks x0,z0,x1,z1] [--y min,max] [--dimension d] [-o out]`
+reads a save of **yours** (read only, nothing is written to it) and writes a glTF of a region: one node per chunk column
+(16 x 16 blocks, the save's whole height) at its place in the world, in the game's block coordinates (a block at `(bx, by, bz)`
+spans `bx..bx+1`, `by..by+1`, `bz..bz+1`; +X east, +Y up, +Z south, negative heights as they are). It then prints what it left out and
+why. The jar is the one of the version the save was made by (`--jar` or `--mc-version` pick another); saves are looked for like
+jars are (`mc-unpack worlds`). A save read with another version's jar works as far as the names match, and the report counts the blocks the
+jar has no blockstate for (a 26.3 save of the village here, read with the 1.21.1 or the 26.2 jar, loses nothing; with the 1.20.1 or the 1.19.2 jar it loses only `short_grass`, a name from 1.20.3). **No world data is in this repository; nothing here ships or downloads a world.**
+
+| Save made by | What a chunk is | Here |
+|--------------|-----------------|------|
+| 26.x | `sections[]`, `block_states`/`biomes` palettes; a palette entry is `"minecraft:air"`, `{"": name}` or `{id, properties}`; `dimensions/<ns>/<name>/region` | **read, checked against real saves** (26.3: 3 saves, 4,405 finished chunks) |
+| 1.18 to 1.21 | the same with `{Name, Properties}` entries; saves from before 26.x keep the nether and the end in `DIM-1/region`, `DIM1/region` and the overworld in `region` (seen in the 1.12.2 save here; the code also reads `dimensions/<ns>/<name>/region` where 1.16 and later datapack dimensions are) | read by the same code; **no save of these versions exists on the author's machine** (the 1.19.2, 1.20.1 and 1.21.1 jars are installed, no worlds): tested on synthetic chunks only |
+| 1.16 and 1.17 | `Level.Sections`, `Palette`/`BlockStates`; entries do not span longs; biomes are numbers | blocks read (synthetic chunks only); **biome tint left out**: which biome a number is lives in the game's code |
+| 1.13 to 1.15 | the same, entries span longs | blocks read (synthetic chunks only), no biome tint |
+| 1.12.2 and before | numeric block ids and 4-bit data values | **left out**, see below; the real 1.12.2 save here is recognised and reported, not drawn |
+
+Per chunk, the packing is told by the length of the `long` array (the two packings differ in length for every width but 4, 8 and 16
+bits), so a world that holds chunks of several versions reads. Regions are read by seeking (never whole), with their table checked
+against the file; compression is zlib, gzip, none, and LZ4 (1.20.5 and later; the stream is lz4-java's block format, checked here
+against a block made by the `lz4` tool, and **not against a real LZ4 save: none exists on this machine**); a chunk too big for the
+file is read from its `c.<x>.<z>.mcc`. Chunks the game had not finished (`structure_starts`, `terrain`, `biomes`, `initialize_light`...;
+in the 26.3 saves here nearly half of them) are left out as the game regenerates them (`--include-unfinished` reads them as saved).
+
+**1.12.2 (and every save from before the flattening) is left out, on purpose.** A chunk there says `Blocks[i] = 98, Data[i] = 3`. Which
+block 98 is comes from the game's registration code (`Block.registerBlocks`), what 3 means from each block class's `getStateFromMeta`,
+and the properties a model needs to pick a variant (a fence's arms, a stair's corner shape, snowy grass, redstone power) are not
+stored at all: the game computes them from the neighbours when it draws (`getActualState`). The 1.12.2 jar holds no table for any of
+it (its entries are assets, advancements, recipes, loot tables, structures, and obfuscated classes this crate never reads). A Forge
+save's `level.dat` has the id-to-name table (`FML`), which names the blocks and still says nothing of the data values. Anything drawn
+from that would be invented, so such chunks are counted and named in the report and nothing is drawn. A save of 1.7.10 or before
+cannot even start: its jar has no models.
+
+**Faces.** A model face with a `cullface` is dropped when the block on that side has quads in the plane between the two cells that
+face this block, are of opaque textures (every texel opaque, not `force_translucent`) and together cover the whole unit square.
+*This rule is ours*: the game's own flags (`canOcclude`, occlusion shapes) are in code. It never drops a face between two blocks of
+the same kind (glass, ice and leaves do in the game, by a flag in code), and a texture with a single transparent texel never hides
+anything, so this draws **more** faces than the game, with one possible exception: a block the game marks as not occluding although its model is a full cube of opaque textures would still hide its neighbours' faces here (the flag is in code and none was checked). A face with no `cullface` is always kept. At the edge
+of the window the blocks of the next chunk (read as a border, never drawn) decide; where there is no chunk, the face stays. `--y`
+cuts the same way: the blocks above and below the cut still hide faces.
+
+**Blocks.** Each distinct block state is baked once from the blockstate and the models, exactly as `block/<name>?variant=...` is. A
+blockstate that lists weighted variants uses the first (the game picks by position, in code); a state with a property the file does
+not mention ignores it. Block entities are their block's model and nothing else (no inventory, text or items): chests, banners,
+heads, shulker boxes and the like have none in the data and are left out and counted, like **fluids**: `water` and `lava` have an
+empty model (their shape, by level and flow, is code), so a lake is a hole and a waterlogged block is drawn without its water (counted).
+A block the jar has no blockstate for (another version's, a mod's) is listed as not in the jar. Air is not counted.
+
+**Tints.** Grass, ferns, sugar cane and the like use the grass colormap, oak, jungle, acacia and dark oak leaves and vines the
+foliage one, a water cauldron the biome's `water_color`, at the biome of the block's 4 x 4 x 4 cell (1.18 and later), looked up as the
+game does in the jar's own `colormap/*.png` and `worldgen/biome/*.json` (including a biome's own `grass_color` and `foliage_color`).
+*Which block uses which colormap is in the game's code*; the table is ours, small, and written in one place (`world/blocks.rs`,
+`tint_rule`). The 26.x item definitions confirm its grass entries (a real-data test), nothing confirms the foliage ones. Left out and
+listed: spruce and birch leaves (a constant in code), redstone dust by power, stems by age, the lily pad and any other block with a
+`tintindex` and no entry; the swamp and dark forest grass modifiers and the frozen temperature modifier (applied in code; the report
+names the biomes); the blending of colours between neighbouring biomes. Biome colours need the biome data in the jar (1.20.1 and later;
+the 1.19.2 jar on the author's machine has none), so a save read with a jar without it is drawn untinted, and the report says so.
+
+**Scene and ids.** The Provider gives each region as a `Level` (`world/<save>/<x>,<z>`, then `?radius=n&chunks=x0,z0,x1,z1&y=min,max&dimension=d&unfinished=1`
+for the options), and `load_scene` returns one inline model per chunk column with one instance each at `(16 cx, 0, 16 cz)`, no lights and no sky
+(the game's are not in the data). The save has to be given to the provider (`Minecraft::with_saves`, `with_discovered_saves`); it never
+looks for worlds on its own. `list` offers regions of saves from 1.13 on that have a finished chunk; `Minecraft::load_world_report` returns the same scene with the report.
+
+```rust
+let mc = mc_unpack::bridge::Minecraft::open_default()?.with_discovered_saves();
+let region = mc.list("world/")?;                                   // the regions of every readable save
+let (scene, report) = mc.load_world_report("world/New World/0,0?chunks=0,0,7,7")?;
+for line in report.lines() { println!("{line}"); }                // what was left out, and why
+```
+
+**Memory and limits.** Everything is capped and a window over a cap is refused with the number, never cut short:
+
+| What | Limit |
+|------|-------|
+| chunks the region tables list in the window | 4,096 (`Limits::max_chunks`), radius at most 8 regions |
+| bytes of block data held (8 KiB per mixed section, 2 bytes per uniform one) | 512 MiB |
+| quads in the scene (about 100 bytes each; 150 in a glTF) | 3,000,000 (`--max-quads`) |
+| one chunk, uncompressed / an external `.mcc` | 24 MiB / 32 MiB |
+| tags in one NBT document, nesting | 2,000,000, 128 |
+| distinct block states, biomes | 60,000, 4,096 |
+| a palette entry: name, a property, properties | 256, 128 bytes, 64 |
+
+Measured (release, this Mac): a whole region of 26.3 (about 400 finished chunks) takes 0.1 s and 125 MB; a synthetic region of 1,024
+chunks and 100 million blocks takes 1.2 s and 190 MB when it is solid stone (1.3 million quads after culling, 602 million faces
+dropped) and is refused at the quad cap after 0.6 s and 520 MB when it is noise. File handles are opened one at a time. A region
+file, a chunk and a `level.dat` are read as untrusted: every length is checked against the file before use and nothing panics
+(see Checking).
 
 ## Checking
 
@@ -339,13 +438,26 @@ materials; options are the checker's, `--help` lists them; put `--mc-version` be
 **no errors and no warnings** (exit status 0); the same assets in bridge-testbed give a 1.000 x 1.000 x 1.000 m box for
 `block/stone`, identical to the Hytale block it is compared with (AABB `[-0.5, 0, -0.5]` to `[0.5, 1, 0.5]`).
 
-Tests: `cargo test` runs 159 unit tests on tiny synthetic jars built in the tests (no game data anywhere; they include a zip that
-lies about its size and PNGs over the limits) and 24 real-data tests
+Tests: `cargo test` runs 220 unit tests on tiny synthetic jars and saves built in the tests (no game data anywhere; they include a zip
+that lies about its size, PNGs over the limits, NBT with lengths past the file, region tables that point anywhere, and regions
+written chunk by chunk in the 1.13 and in the current layout) and 24 real-data tests
 in `tests/game_data.rs` that read the installed jars and skip, saying so, where a version is not installed. The real-data
 tests pin, among others: grass tint equals plains `#91bd59` from the jar's own colormap and biome; stairs facing east have
 their tall side to the east in 1.12.2, 1.21.1 and 26.3; `uvlock` keeps planks aligned in all four facings; a wall torch
 leans away from its wall (which fixes the sign of element rotation); pistons face where their state says; and `check` has
 no failures on every installed version.
+
+`tests/world_data.rs` has 8 more that read the saves on the machine (read only) and skip where there is none of the version:
+every region of the 26.3 saves loads with no failed chunk and every block is accounted for as drawn, left out or not in the jar;
+**the blocks of 4,405 finished chunks agree, column by column, with the `WORLD_SURFACE` heightmap the game itself saved** (an
+independent record of where the blocks are, which checks the bit packing, the section order, negative heights and the x/z order at
+once); the tint table agrees with the 26.x item definitions; a 1.12.2 save is reported as numeric ids and a 1.7.10 one as having no
+models; every region the provider lists is a scene the bridge's checker accepts (`check-conformance --with-worlds --kind level`: 12 of 12
+clean with rewrite-bridge 0.2.2); and damaged copies of a real region and of a real chunk never panic. The fuzz tests
+(`src/world/fuzz.rs`) flip, cut, splice and set to extremes the bytes of NBT, chunks, the three compressions, region files, whole
+loads and `level.dat`: 60,000 rounds per target in a release build and 25,000 in a debug one (with overflow checks) found no panic;
+`MC_UNPACK_FUZZ=<rounds>` sets the count (400 by default). `cargo test --release -- --ignored stress --nocapture` builds the
+1,024-chunk regions of the paragraph above.
 
 ## Rendering checks
 
@@ -395,6 +507,10 @@ content and are not in this repository.
 - **Particles, fluids, sky, GUI textures, sounds, shaders, `post_effect`, fonts**: not read (the PNGs are decoded by `check`,
   nothing builds models from them).
 - **Resource packs, modded namespaces**: only the `minecraft` namespace in the jar.
+- **Worlds** (the rest is under [Worlds](#worlds)): saves from before 1.13; fluids; block entities beyond their block's model;
+  entities (mobs, items, armor stands: their own region files and code); lights, sky, weather, fog; the game's choice among weighted
+  variants; colours the game computes (see Tints); biome blending; faces the game hides by a rule in code; chunks the game had not
+  finished (unless asked); LZ4 against a real save (none here); every version but 26.3 against a real save (none here).
 - **Blockstate properties are not enumerated**: the property list comes from the file (`list --states`), not from the game's
   block classes, so a state with a property the file never mentions (`power`, `waterlogged`) selects the same model.
 
@@ -420,7 +536,9 @@ they change):
   guidelines before you share any.
 - Mojang may change the guidelines or withdraw them at any time, and may take down software that breaks them.
 
-This tool only reads a jar on your own disk and writes files to a folder you name; it sends nothing anywhere. It is made
+This tool only reads a jar (and, for `world`, a save folder) on your own disk and writes files to a folder you name; it never
+writes to a save, and it sends nothing anywhere. A save is your content, and so are the exports of it: do not put worlds in this
+repository (the tests read the ones on the machine they run on and skip without them). It is made
 and maintained by [patodois](https://github.com/patodois), who is responsible for it; reach them through this repository's
 [issues](https://github.com/patodois/mc-unpack/issues). The author is not affiliated with Mojang or Microsoft and does not
 claim the legality of reading your own install for any purpose you have in mind: that is yours to check.

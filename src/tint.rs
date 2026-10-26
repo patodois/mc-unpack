@@ -12,7 +12,7 @@
 //! and downfall are clamped to 0..1, downfall is multiplied by temperature, and the colour is the
 //! pixel at `x = (1 - temperature) * 255`, `y = (1 - downfall) * 255` (truncated) of the 256 x 256
 //! map. No biome colour is hardcoded here: temperature and downfall come from the caller or, in
-//! jars from 1.19 on, from the jar's own `data/minecraft/worldgen/biome/*.json` ([`Biome`]).
+//! jars that have them (1.20.1 and later here; the 1.19.2 jar has none), from the jar's own `data/minecraft/worldgen/biome/*.json` ([`Biome`]).
 
 use std::collections::BTreeMap;
 
@@ -148,7 +148,7 @@ pub fn color_from_json(v: &Value) -> Option<[u8; 3]> {
     }
 }
 
-/// A biome's climate and colour overrides, as the jar's data gives them (jars from 1.19 on; before
+/// A biome's climate and colour overrides, as the jar's data gives them (jars that have them, 1.20.1 and later here; before
 /// that biomes were in code)
 #[derive(Clone, Debug, PartialEq)]
 pub struct Biome {
