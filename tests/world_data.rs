@@ -147,9 +147,9 @@ fn the_blocks_agree_with_the_heightmaps_the_game_saved() {
 }
 
 #[test]
-fn the_tint_table_agrees_with_the_item_definitions_of_the_jar() {
+fn only_the_item_definitions_say_which_blocks_take_the_grass_colormap() {
     use mc_unpack::tint::ColormapKind;
-    use mc_unpack::world::blocks::{tint_rule, TintSource};
+    use mc_unpack::world::blocks::data_tint;
     for v in ["26.2", "26.3"] {
         let Some(jar) = find_jars().into_iter().find(|j| j.version == v) else {
             eprintln!("skipping: Minecraft {v} is not installed here");
@@ -159,48 +159,38 @@ fn the_tint_table_agrees_with_the_item_definitions_of_the_jar() {
         fn grass(v: &serde_json::Value) -> bool {
             match v {
                 serde_json::Value::Object(m) => {
-                    (m.get("type").and_then(|t| t.as_str()) == Some("minecraft:grass")
-                        && m.contains_key("temperature"))
+                    m.get("type").and_then(|t| t.as_str()) == Some("minecraft:grass")
                         || m.values().any(grass)
                 }
                 serde_json::Value::Array(l) => l.iter().any(grass),
                 _ => false,
             }
         }
-        let mut grass_items = 0;
+        let mut grass_items = Vec::new();
         for n in a.item_names() {
             let Ok(d) = a.item_definition(&n) else {
                 continue;
             };
+            // exactly the items whose definition has a grass tint are the blocks that get one
+            assert_eq!(
+                data_tint(&a, &n),
+                grass(&d).then_some(ColormapKind::Grass),
+                "{v}: {n}"
+            );
             if grass(&d) {
-                grass_items += 1;
-                assert_eq!(
-                    tint_rule(&n),
-                    Some(TintSource::Colormap(ColormapKind::Grass)),
-                    "{v}: the item {n} has a grass tint and the table has no grass rule for the block"
-                );
+                grass_items.push(n);
             }
         }
-        assert!(
-            grass_items >= 6,
-            "{v}: only {grass_items} grass-tinted items"
-        );
-        // and the other way: every grass entry of the table that is an item of this jar is tinted
-        for n in [
-            "grass_block",
-            "short_grass",
-            "tall_grass",
-            "fern",
-            "large_fern",
-            "bush",
-        ] {
-            if a.item_names().iter().any(|i| i == n) {
-                assert!(
-                    grass(&a.item_definition(n).unwrap()),
-                    "{v}: {n} is in the table and its item has no grass tint"
-                );
-            }
+        assert!(grass_items.len() >= 6, "{v}: {grass_items:?}");
+        // leaves and vines have a constant item tint: the data does not say a colormap
+        for n in ["oak_leaves", "vine", "birch_leaves"] {
+            assert_eq!(data_tint(&a, n), None, "{v}: {n}");
         }
+    }
+    // a jar from before the item definitions says nothing, grass included
+    if let Some(jar) = find_jars().into_iter().find(|j| j.version == "1.21.1") {
+        let a = Assets::open(&jar.path).unwrap();
+        assert_eq!(data_tint(&a, "grass_block"), None);
     }
 }
 

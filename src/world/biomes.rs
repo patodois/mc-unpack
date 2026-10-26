@@ -3,7 +3,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use super::blocks::TintSource;
 use crate::assets::Assets;
 use crate::tint::ColormapKind;
 
@@ -16,7 +15,7 @@ pub const MAX_BIOMES: usize = 4096;
 pub struct BiomeTable<'a> {
     assets: &'a Assets,
     pub names: Vec<String>,
-    colors: Vec<[Option<[u8; 3]>; 4]>,
+    colors: Vec<[Option<[u8; 3]>; 3]>,
     index: HashMap<String, u16>,
     /// Biomes met whose `grass_color_modifier` or `temperature_modifier` the game applies in code:
     /// name to what it says. Their colours here are the plain colormap ones.
@@ -25,12 +24,11 @@ pub struct BiomeTable<'a> {
     pub unknown: BTreeSet<String>,
 }
 
-fn slot(s: TintSource) -> usize {
-    match s {
-        TintSource::Colormap(ColormapKind::Grass) => 0,
-        TintSource::Colormap(ColormapKind::Foliage) => 1,
-        TintSource::Colormap(ColormapKind::DryFoliage) => 2,
-        TintSource::Water => 3,
+fn slot(k: ColormapKind) -> usize {
+    match k {
+        ColormapKind::Grass => 0,
+        ColormapKind::Foliage => 1,
+        ColormapKind::DryFoliage => 2,
     }
 }
 
@@ -39,7 +37,7 @@ impl<'a> BiomeTable<'a> {
         BiomeTable {
             assets,
             names: vec![String::new()],
-            colors: vec![[None; 4]],
+            colors: vec![[None; 3]],
             index: HashMap::new(),
             modifiers: BTreeMap::new(),
             unknown: BTreeSet::new(),
@@ -54,7 +52,7 @@ impl<'a> BiomeTable<'a> {
         if self.names.len() >= MAX_BIOMES {
             return NO_BIOME;
         }
-        let mut colors = [None; 4];
+        let mut colors = [None; 3];
         let known = match self.assets.biome(name) {
             Ok(b) => {
                 for kind in [
@@ -64,10 +62,9 @@ impl<'a> BiomeTable<'a> {
                 ] {
                     // a jar without a colormap (dry foliage before 1.21.5) leaves that colour out
                     if let Ok((tint, _)) = self.assets.tint_for_biome(kind, name) {
-                        colors[slot(TintSource::Colormap(kind))] = self.assets.tint_rgb(&tint).ok();
+                        colors[slot(kind)] = self.assets.tint_rgb(&tint).ok();
                     }
                 }
-                colors[slot(TintSource::Water)] = b.water_color;
                 let mut mods = Vec::new();
                 if let Some(m) = &b.grass_color_modifier {
                     mods.push(format!("grass_color_modifier {m}"));
@@ -92,7 +89,7 @@ impl<'a> BiomeTable<'a> {
         id
     }
 
-    pub fn color(&self, id: u16, source: TintSource) -> Option<[u8; 3]> {
-        self.colors.get(id as usize).and_then(|c| c[slot(source)])
+    pub fn color(&self, id: u16, kind: ColormapKind) -> Option<[u8; 3]> {
+        self.colors.get(id as usize).and_then(|c| c[slot(kind)])
     }
 }

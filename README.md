@@ -296,13 +296,20 @@ why. The jar is the one of the version the save was made by (`--jar` or `--mc-ve
 jars are (`mc-unpack worlds`). A save read with another version's jar works as far as the names match, and the report counts the blocks the
 jar has no blockstate for (a 26.3 save of the village here, read with the 1.21.1 or the 26.2 jar, loses nothing; with the 1.20.1 or the 1.19.2 jar it loses only `short_grass`, a name from 1.20.3). **No world data is in this repository; nothing here ships or downloads a world.**
 
-| Save made by | What a chunk is | Here |
-|--------------|-----------------|------|
-| 26.x | `sections[]`, `block_states`/`biomes` palettes; a palette entry is `"minecraft:air"`, `{"": name}` or `{id, properties}`; `dimensions/<ns>/<name>/region` | **read, checked against real saves** (26.3: 3 saves, 4,405 finished chunks) |
-| 1.18 to 1.21 | the same with `{Name, Properties}` entries; saves from before 26.x keep the nether and the end in `DIM-1/region`, `DIM1/region` and the overworld in `region` (seen in the 1.12.2 save here; the code also reads `dimensions/<ns>/<name>/region` where 1.16 and later datapack dimensions are) | read by the same code; **no save of these versions exists on the author's machine** (the 1.19.2, 1.20.1 and 1.21.1 jars are installed, no worlds): tested on synthetic chunks only |
-| 1.16 and 1.17 | `Level.Sections`, `Palette`/`BlockStates`; entries do not span longs; biomes are numbers | blocks read (synthetic chunks only); **biome tint left out**: which biome a number is lives in the game's code |
-| 1.13 to 1.15 | the same, entries span longs | blocks read (synthetic chunks only), no biome tint |
-| 1.12.2 and before | numeric block ids and 4-bit data values | **left out**, see below; the real 1.12.2 save here is recognised and reported, not drawn |
+### World support per version
+
+| Save made by | What a chunk is | Read | Biome tint (grass only, see Tints) |
+|--------------|-----------------|------|------------------------------------|
+| 26.x | `sections[]`, `block_states`/`biomes` palettes; a palette entry is `"minecraft:air"`, `{"": name}` or `{id, properties}`; `dimensions/<ns>/<name>/region` | **yes, checked against real saves** (26.3: 3 saves, 4,405 finished chunks) | yes (item definitions say which blocks) |
+| 1.21.4 to 1.21.x | the same layout with `{Name, Properties}` entries | read by the same code; **no save of these versions exists on the author's machine**: synthetic chunks only | yes, where the jar has item definitions and biome data |
+| 1.18 to 1.21.3 | the same | the same: synthetic chunks only (jars of 1.19.2, 1.20.1, 1.21.1 are installed, no worlds) | **no**: no item definitions in the jar, so the data does not say which blocks |
+| 1.16 and 1.17 | `Level.Sections`, `Palette`/`BlockStates`; entries do not span longs; biomes are numbers | blocks only; synthetic chunks only | no (numeric biomes, and no item definitions) |
+| 1.13 to 1.15 | the same, entries span longs | blocks only; synthetic chunks only | no |
+| 1.12.2 and before | numeric block ids and 4-bit data values | **no, on purpose**, see below; the real 1.12.2 save here is recognised and reported, not drawn | no |
+
+Saves from before 26.x keep the nether and the end in `DIM-1/region`, `DIM1/region` and the overworld in `region` (seen in the 1.12.2
+save here); the code also reads `dimensions/<ns>/<name>/region`, where 1.16 and later datapack dimensions are. A save read with the jar of
+another version works as far as the names match (see above).
 
 Per chunk, the packing is told by the length of the `long` array (the two packings differ in length for every width but 4, 8 and 16
 bits), so a world that holds chunks of several versions reads. Regions are read by seeking (never whole), with their table checked
@@ -335,15 +342,19 @@ heads, shulker boxes and the like have none in the data and are left out and cou
 empty model (their shape, by level and flow, is code), so a lake is a hole and a waterlogged block is drawn without its water (counted).
 A block the jar has no blockstate for (another version's, a mod's) is listed as not in the jar. Air is not counted.
 
-**Tints.** Grass, ferns, sugar cane and the like use the grass colormap, oak, jungle, acacia and dark oak leaves and vines the
-foliage one, a water cauldron the biome's `water_color`, at the biome of the block's 4 x 4 x 4 cell (1.18 and later), looked up as the
-game does in the jar's own `colormap/*.png` and `worldgen/biome/*.json` (including a biome's own `grass_color` and `foliage_color`).
-*Which block uses which colormap is in the game's code*; the table is ours, small, and written in one place (`world/blocks.rs`,
-`tint_rule`). The 26.x item definitions confirm its grass entries (a real-data test), nothing confirms the foliage ones. Left out and
-listed: spruce and birch leaves (a constant in code), redstone dust by power, stems by age, the lily pad and any other block with a
-`tintindex` and no entry; the swamp and dark forest grass modifiers and the frozen temperature modifier (applied in code; the report
-names the biomes); the blending of colours between neighbouring biomes. Biome colours need the biome data in the jar (1.20.1 and later;
-the 1.19.2 jar on the author's machine has none), so a save read with a jar without it is drawn untinted, and the report says so.
+**Tints.** A biome tint is applied **only where the jar's data says the block takes it**, and the data says it in one place: a 26.x
+item definition (`items/<name>.json`, 1.21.4 and later) whose `tints` hold a `minecraft:grass` entry makes the block of the same name
+(grass block, short and tall grass, ferns, `bush`...) take the grass colormap. That colour is looked up as the game does, in the
+jar's own `colormap/grass.png` and `worldgen/biome/*.json` (a biome's own `grass_color` included), at the biome of the block's
+4 x 4 x 4 cell (1.18 and later). Nothing else was found: the foliage of leaves and vines is a `minecraft:constant` in their item
+definitions, the water cauldron has no item definition of its own, and the biome files hold colours but not which block takes them
+(26.3 and 1.21.1 were searched for `foliage`, `tint` and `colormap`, in every non-class entry). So **every other block with a
+`tintindex` is drawn untinted** (its `tintindex` stays in the model) and the report lists it as "biome tint left out: the
+block-to-tint mapping is in the game's code", with the count: oak, jungle, acacia and dark oak leaves, vines, the water cauldron,
+redstone dust, stems, the lily pad, spruce and birch leaves. In a jar with no item definitions (1.13 to 1.21.3) nothing is tinted at
+all, grass included, and the report says why. Also left out: the swamp and dark forest grass modifiers and the frozen temperature
+modifier (applied in code; the report names the biomes) and the blending of colours between neighbouring biomes. Biome colours need
+the biome data in the jar (1.20.1 and later; the 1.19.2 jar on the author's machine has none).
 
 **Scene and ids.** The Provider gives each region as a `Level` (`world/<save>/<x>,<z>`, then `?radius=n&chunks=x0,z0,x1,z1&y=min,max&dimension=d&unfinished=1`
 for the options), and `load_scene` returns one inline model per chunk column with one instance each at `(16 cx, 0, 16 cz)`, no lights and no sky
@@ -438,7 +449,7 @@ materials; options are the checker's, `--help` lists them; put `--mc-version` be
 **no errors and no warnings** (exit status 0); the same assets in bridge-testbed give a 1.000 x 1.000 x 1.000 m box for
 `block/stone`, identical to the Hytale block it is compared with (AABB `[-0.5, 0, -0.5]` to `[0.5, 1, 0.5]`).
 
-Tests: `cargo test` runs 221 unit tests on tiny synthetic jars and saves built in the tests (no game data anywhere; they include a zip
+Tests: `cargo test` runs 222 unit tests on tiny synthetic jars and saves built in the tests (no game data anywhere; they include a zip
 that lies about its size, PNGs over the limits, NBT with lengths past the file, region tables that point anywhere, and regions
 written chunk by chunk in the 1.13 and in the current layout) and 24 real-data tests
 in `tests/game_data.rs` that read the installed jars and skip, saying so, where a version is not installed. The real-data
@@ -451,7 +462,7 @@ no failures on every installed version.
 every region of the 26.3 saves loads with no failed chunk and every block is accounted for as drawn, left out or not in the jar;
 **the blocks of 4,405 finished chunks agree, column by column, with the `WORLD_SURFACE` heightmap the game itself saved** (an
 independent record of where the blocks are, which checks the bit packing, the section order, negative heights and the x/z order at
-once); the tint table agrees with the 26.x item definitions; a 1.12.2 save is reported as numeric ids and a 1.7.10 one as having no
+once); the blocks that get a biome tint are exactly the ones whose 26.x item definition has a grass tint; a 1.12.2 save is reported as numeric ids and a 1.7.10 one as having no
 models; every region the provider lists is a scene the bridge's checker accepts (`check-conformance --with-worlds --kind level`: 12 of 12
 clean with rewrite-bridge 0.2.2); and damaged copies of a real region and of a real chunk never panic. The fuzz tests
 (`src/world/fuzz.rs`) flip, cut, splice and set to extremes the bytes of NBT, chunks, the three compressions, region files, whole
@@ -510,7 +521,7 @@ content and are not in this repository.
 - **Resource packs, modded namespaces**: only the `minecraft` namespace in the jar.
 - **Worlds** (the rest is under [Worlds](#worlds)): saves from before 1.13; fluids; block entities beyond their block's model;
   entities (mobs, items, armor stands: their own region files and code); lights, sky, weather, fog; the game's choice among weighted
-  variants; colours the game computes (see Tints); biome blending; faces the game hides by a rule in code; chunks the game had not
+  variants; colours the game computes and the block-to-tint mapping the data does not state (see Tints); biome blending; faces the game hides by a rule in code; chunks the game had not
   finished (unless asked); LZ4 against a real save (none here); every version but 26.3 against a real save (none here).
 - **Blockstate properties are not enumerated**: the property list comes from the file (`list --states`), not from the game's
   block classes, so a state with a property the file never mentions (`power`, `waterlogged`) selects the same model.

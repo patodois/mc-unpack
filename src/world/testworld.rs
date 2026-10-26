@@ -13,9 +13,9 @@ use super::region::tests::{region_bytes, temp_dir};
 use crate::assets::Assets;
 use crate::jar::testjar::{png, JarBuilder};
 
-/// A jar (1.13 to 1.21.3 layout, with the biome data and colormaps of 1.19 and later) holding:
-/// `stone`, `glass` (partly transparent), `grass_block` and `oak_leaves` (tinted), `birch_leaves`
-/// (tinted, not in the table), `oak_slab` (bottom, top, double), `water` and `chest` (no geometry),
+/// A jar (1.21.4 and later layout: it has item definitions; with biome data and colormaps) holding:
+/// `stone`, `glass` (partly transparent), `grass_block` (tinted, and its item definition says grass),
+/// `oak_leaves` and `birch_leaves` (tinted; no item definition says what colours them), `oak_slab` (bottom, top, double), `water` and `chest` (no geometry),
 /// `fence` (multipart), and the biomes `plains`, `desert`, `swamp`
 pub fn world_jar() -> Assets {
     let tex = |c: u8| png(16, 16, move |_, _| [c, c, c, 255]);
@@ -71,6 +71,15 @@ pub fn world_jar() -> Assets {
         )
     };
     let jar = JarBuilder::new()
+        // the one place the data says which block takes a biome colormap: the item's tints
+        .add(
+            "assets/minecraft/items/grass_block.json",
+            r#"{"model":{"type":"minecraft:model","model":"minecraft:block/grass_block","tints":[{"type":"minecraft:grass","temperature":0.5,"downfall":1.0}]}}"#,
+        )
+        .add(
+            "assets/minecraft/items/oak_leaves.json",
+            r#"{"model":{"type":"minecraft:model","model":"minecraft:block/oak_leaves","tints":[{"type":"minecraft:constant","value":-12012264}]}}"#,
+        )
         .add("assets/minecraft/blockstates/stone.json", r#"{"variants":{"":{"model":"block/stone"}}}"#)
         .add("assets/minecraft/blockstates/glass.json", r#"{"variants":{"":{"model":"block/glass"}}}"#)
         .add("assets/minecraft/blockstates/grass_block.json", r#"{"variants":{"snowy=false":{"model":"block/grass_block"},"snowy=true":{"model":"block/grass_block"}}}"#)

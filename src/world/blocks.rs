@@ -21,26 +21,36 @@
 //! with no `cullface` is always kept. The effect is more faces than the game draws, never fewer than
 //! it shows: nothing that is visible in the game is dropped.
 //!
-//! # Tints: the table is ours
+//! # Tints: only where the data says
 //!
-//! Which blocks use which biome colormap is in the game's code, not in the data. [`tint_rule`] is a
-//! small table written from what the game does for the blocks whose models carry a `tintindex`, and
-//! it is the only place in this crate that says it. 26.x item definitions confirm the `grass` entries
-//! (every item with a `minecraft:grass` tint is in the table; a real-data test checks it); the foliage
-//! entries are not in any data. Blocks with a `tintindex` that are not in the table (spruce and birch
-//! leaves, whose colour is a constant in code, redstone dust by power, stems by age, the lily pad) are
-//! left untinted and listed in the report.
+//! Which blocks use which biome colormap is in the game's code. This crate applies a biome tint to a
+//! block **only where the jar's data says so**, and there is one such place: a 26.x item definition
+//! (`items/<name>.json`) whose `tints` hold a `minecraft:grass` entry says that the item, and so the
+//! block of the same name, is coloured from the grass colormap ([`data_tint`]). Nothing else in the
+//! jars says it (searched in 26.3 and 1.21.1: the item definitions, the models and blockstates, tags,
+//! worldgen and the biome files were read for `foliage`, `tint` and `colormap`; leaves and vines have
+//! a `minecraft:constant` item tint, the water cauldron has no item of its own, and the biome files
+//! only hold the colours, not which block takes them). So:
+//!
+//! - grass blocks, ferns, tall grass and the like are tinted in jars that have item definitions
+//!   (1.21.4 and later, 26.x);
+//! - everything else with a `tintindex` (foliage on leaves and vines, the water cauldron, redstone
+//!   dust, stems, the lily pad, spruce and birch leaves) is **left untinted** and counted in the
+//!   report as "biome tint left out: the block-to-tint mapping is in the game's code";
+//! - in a jar with no item definitions (1.13 to 1.21.3) nothing is tinted at all, grass included.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
+use serde_json::Value;
 
 use crate::assets::{Assets, LeftOut};
 use crate::blockstate::State;
 use crate::model::Dir;
 use crate::texture::{AlphaClass, Rgba};
 use crate::tint::ColormapKind;
+use crate::version::Layout;
 
 /// The state id of "no block": air, and anything outside the loaded chunks
 pub const AIR: u16 = 0;
@@ -60,29 +70,28 @@ pub fn dir_index(d: Dir) -> usize {
     }
 }
 
-/// Where the colour of a block's tinted faces comes from
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum TintSource {
-    /// A biome colormap, looked up at the biome's temperature and downfall (or the biome's own colour
-    /// where its data overrides it)
-    Colormap(ColormapKind),
-    /// The biome's `water_color`
-    Water,
-}
-
-/// The colour source of the faces with a `tintindex` of this block, per the table above
-pub fn tint_rule(local_name: &str) -> Option<TintSource> {
-    use TintSource::*;
-    match local_name {
-        // `grass` is the name before 1.20.3; `bush` (1.21.5) is confirmed by its item's `grass` tint
-        "grass_block" | "grass" | "short_grass" | "tall_grass" | "fern" | "large_fern"
-        | "potted_fern" | "sugar_cane" | "bush" => Some(Colormap(ColormapKind::Grass)),
-        "oak_leaves" | "jungle_leaves" | "acacia_leaves" | "dark_oak_leaves" | "vine" => {
-            Some(Colormap(ColormapKind::Foliage))
+/// The biome colormap the data says the faces with a `tintindex` of this block use: the grass one,
+/// where the item of the same name has a `minecraft:grass` tint in its item definition (1.21.4 and
+/// later). `None` is "the data does not say".
+pub fn data_tint(assets: &Assets, local_name: &str) -> Option<ColormapKind> {
+    if assets.layout() != Layout::ModelsWithItemDefs {
+        return None;
+    }
+    fn has_grass(v: &Value) -> bool {
+        match v {
+            Value::Object(m) => {
+                m.get("type").and_then(Value::as_str) == Some("minecraft:grass")
+                    || m.values().any(has_grass)
+            }
+            Value::Array(l) => l.iter().any(has_grass),
+            _ => false,
         }
-        // the water in a cauldron is the one water the models draw
-        "water_cauldron" => Some(Water),
-        _ => None,
+    }
+    let def = assets.item_definition(local_name).ok()?;
+    if has_grass(&def) {
+        Some(ColormapKind::Grass)
+    } else {
+        None
     }
 }
 
@@ -131,7 +140,7 @@ pub struct StateEntry {
     pub quads: Vec<PreQuad>,
     /// Per side ([`dir_index`]): the state's quads cover it, opaquely
     pub covers: [bool; 6],
-    pub tint: Option<TintSource>,
+    pub tint: Option<ColormapKind>,
     pub fate: Fate,
     /// The state says `waterlogged=true`: the water is a fluid, which is left out
     pub waterlogged: bool,
@@ -275,7 +284,7 @@ impl<'a> StateTable<'a> {
             return e;
         }
         e.notes = baked.report.notes.clone();
-        let rule = tint_rule(local);
+        let rule = data_tint(self.assets, local);
         for q in baked.quads() {
             let tex = match self.texture(&q.texture) {
                 Ok(t) => t,
@@ -433,18 +442,17 @@ mod tests {
     }
 
     #[test]
-    fn the_tint_table() {
-        assert_eq!(
-            tint_rule("grass_block"),
-            Some(TintSource::Colormap(ColormapKind::Grass))
-        );
-        assert_eq!(
-            tint_rule("oak_leaves"),
-            Some(TintSource::Colormap(ColormapKind::Foliage))
-        );
-        assert_eq!(tint_rule("water_cauldron"), Some(TintSource::Water));
-        assert_eq!(tint_rule("birch_leaves"), None);
-        assert_eq!(tint_rule("redstone_wire"), None);
+    fn only_the_item_definitions_say_which_block_is_tinted() {
+        // the test jar has an item definition with a grass tint for `grass_block` and a constant one
+        // for `oak_leaves`
+        let a = crate::world::testworld::world_jar();
+        assert_eq!(a.layout(), Layout::ModelsWithItemDefs);
+        assert_eq!(data_tint(&a, "grass_block"), Some(ColormapKind::Grass));
+        assert_eq!(data_tint(&a, "oak_leaves"), None);
+        assert_eq!(data_tint(&a, "stone"), None, "no item definition");
+        assert_eq!(data_tint(&a, "no_such_block"), None);
+        // a jar without item definitions says nothing, grass included
+        assert_eq!(data_tint(&tiny(), "grass_block"), None);
     }
 
     #[test]

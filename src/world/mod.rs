@@ -3,10 +3,11 @@
 //!
 //! The rule is the crate's: **nothing invented, 1:1 with the data**. What a save and the jar hold is
 //! read; what lives in the game's code (the numeric block ids and data values before 1.13, fluids,
-//! block entities beyond their block's model, the game's own occlusion and tint rules) is left out
+//! block entities beyond their block's model, the game's own occlusion rule, most of the block-to-tint
+//! mapping) is left out
 //! and reported, or, where this crate has to decide something the data does not (which faces a block
-//! hides, which blocks take which biome colormap), the rule is written down in one place and called
-//! this crate's own: [`blocks`].
+//! hides), the rule is written down in one place and called this crate's own: [`blocks`]. Biome tints
+//! are applied only where the data says a block takes one.
 //!
 //! Layers, bottom to top:
 //!
@@ -14,8 +15,8 @@
 //!   against the bytes that are there before anything is allocated from it);
 //! - [`chunk`]: a chunk's NBT to palettes and indices per 16 x 16 x 16 section (1.13 and later);
 //! - [`save`]: a save folder, its dimensions and regions, and where saves live on a machine;
-//! - [`blocks`], [`biomes`]: block states baked once each (through [`crate::assets::Assets`]), the
-//!   cover rule and the tint table, biome colours from the jar's data;
+//! - [`blocks`], [`biomes`]: block states baked once each (through [`crate::assets::Assets`]),
+//!   the cover rule and where the data says a block is tinted, biome colours from the jar's data;
 //! - [`grid`]: the blocks of a window of chunks in compact form, and the loader;
 //! - [`mesher`]: the window to meshes, with face culling, tints and the [`mesher::WorldReport`] of
 //!   what was left out; [`crate::gltf::write_world`] writes it, [`scene`] (feature `bridge`) turns it

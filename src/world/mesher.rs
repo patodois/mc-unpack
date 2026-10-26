@@ -236,7 +236,7 @@ pub struct WorldReport {
     pub waterlogged: u64,
     /// Blocks whose faces have a colour from a biome colormap
     pub tinted: u64,
-    /// Blocks with a `tintindex` whose colour is not in the data nor in the table (name, blocks)
+    /// Blocks with a `tintindex` that nothing in the data says a colour source for (name, blocks)
     pub untinted: Vec<(String, u64)>,
     /// Blocks in the table whose biome has no colour (no biome data in the jar, or numeric biomes)
     pub untinted_no_biome: u64,
@@ -349,12 +349,21 @@ impl WorldReport {
             "tinted by a biome colormap: {} block(s)",
             self.tinted
         ));
-        for (n, c) in self.untinted.iter().take(LIST_LINES) {
+        if !self.untinted.is_empty() {
+            let total: u64 = self.untinted.iter().map(|(_, c)| c).sum();
             v.push(format!(
-                "  {} x{}: has a tintindex and no colour source in the data or the table: drawn untinted",
-                esc(n),
-                c
+                "biome tint left out: the block-to-tint mapping is in the game's code ({total} block(s) of {} kind(s) have a tintindex and nothing in the data says what colours it; drawn untinted):",
+                self.untinted.len()
             ));
+            for (n, c) in self.untinted.iter().take(LIST_LINES) {
+                v.push(format!("  {} x{}", esc(n), c));
+            }
+            if self.untinted.len() > LIST_LINES {
+                v.push(format!(
+                    "  ... and {} more kinds",
+                    self.untinted.len() - LIST_LINES
+                ));
+            }
         }
         if self.untinted_no_biome > 0 {
             v.push(format!(
@@ -548,6 +557,11 @@ pub fn build(
     };
     report.left_out = sort(lo);
     report.unknown = sort(unk);
+    if assets.layout() != crate::version::Layout::ModelsWithItemDefs {
+        report.notes.push(
+            "this jar has no item definitions (1.21.4 and later have them), the one place the data says which block takes the grass colormap: nothing is tinted by biome".into(),
+        );
+    }
     if assets.biome_names().is_empty() {
         report
             .notes
@@ -949,34 +963,70 @@ mod tests {
         let px = g.image.pixel(0, 0);
         assert_eq!(px[0], ((200 * plains[0] as u32 + 127) / 255) as u8);
         assert_eq!(px[3], 255);
-        // leaves take the foliage colormap
-        let foliage = colour(&a, ColormapKind::Foliage, "plains");
+        // leaves: the data does not say, so they stay untinted and are counted as left out
         assert!(m
             .materials
             .iter()
-            .any(|x| &*x.texture == "block/leaf" && x.tint == Some(foliage)));
-        // only the faces with a tintindex are tinted: one grass face and all of the leaf's
-        assert_eq!(r.tinted, 3);
-        assert_eq!(r.untinted, vec![]);
+            .any(|x| &*x.texture == "block/leaf" && x.tint.is_none()));
+        // two grass blocks tinted; the leaf block listed
+        assert_eq!(r.tinted, 2);
+        assert_eq!(r.untinted, vec![("minecraft:oak_leaves".to_string(), 1)]);
+        assert!(r
+            .lines()
+            .join("\n")
+            .contains("biome tint left out: the block-to-tint mapping is in the game's code (1 block(s) of 1 kind(s)"));
     }
 
     #[test]
-    fn biome_data_overrides_and_code_rules_are_reported() {
+    fn a_jar_without_item_definitions_tints_nothing() {
+        use crate::jar::testjar::JarBuilder;
+        // the same blocks in a 1.13 to 1.21.3 jar (no `items/` folder): the data says nothing
+        let full = world_jar();
+        let mut b = JarBuilder::new();
+        for n in full.jar().names_under("") {
+            if !n.starts_with("assets/minecraft/items/") && !n.ends_with('/') {
+                b = b.add(n, full.jar().read(n).unwrap());
+            }
+        }
+        let a = Assets::from_jar(b.build()).unwrap();
+        assert_eq!(a.layout(), crate::version::Layout::Models);
+        let mut c = ChunkSpec::new(0, 0);
+        c.set(1, 64, 1, "minecraft:grass_block", &[("snowy", "false")]);
+        let save = write_world("mesher-noitems", "9.9", 9000, &[c], false);
+        let w = World::open(&save).unwrap();
+        let (m, r) = build(&a, &w, &BuildOptions::new(Window::region(0, 0))).unwrap();
+        cleanup(&save);
+        assert_eq!(r.tinted, 0);
+        assert!(m.materials.iter().all(|x| x.tint.is_none()));
+        assert_eq!(r.untinted, vec![("minecraft:grass_block".to_string(), 1)]);
+        assert!(r.lines().join("\n").contains("no item definitions"));
+    }
+
+    #[test]
+    fn biome_modifiers_and_blocks_without_a_source_are_reported() {
         let mut c = ChunkSpec::new(0, 0);
         c.biome = Some("minecraft:swamp".into());
         c.set(1, 64, 1, "minecraft:oak_leaves", &[]);
         c.set(3, 64, 1, "minecraft:grass_block", &[("snowy", "false")]);
         c.set(5, 64, 1, "minecraft:birch_leaves", &[]);
         let (m, r) = one_chunk(&c);
-        // the swamp's own foliage colour
+        // no tint for leaves: nothing in the data says what colours them (the swamp's own foliage
+        // colour is not applied)
         assert!(m
             .materials
             .iter()
-            .any(|x| x.tint == Some([0x6a, 0x70, 0x39])));
-        // its grass modifier is the game's code
+            .all(|x| x.tint != Some([0x6a, 0x70, 0x39])));
+        // the grass block is tinted from the swamp's climate; its grass modifier is the game's code
         assert!(r.biome_modifiers["minecraft:swamp"].contains("grass_color_modifier swamp"));
-        // birch leaves have a tintindex and are not in the table
-        assert_eq!(r.untinted, vec![("minecraft:birch_leaves".to_string(), 1)]);
+        assert_eq!(r.tinted, 1);
+        // both kinds of leaves have a tintindex and no source in the data
+        assert_eq!(
+            r.untinted,
+            vec![
+                ("minecraft:birch_leaves".to_string(), 1),
+                ("minecraft:oak_leaves".to_string(), 1)
+            ]
+        );
         let text = r.lines().join("\n");
         assert!(
             text.contains("birch_leaves") && text.contains("swamp"),
