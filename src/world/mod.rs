@@ -9,28 +9,36 @@
 //! hides), the rule is written down in one place and called this crate's own: [`blocks`]. Biome tints
 //! are applied only where the data says a block takes one.
 //!
-//! Layers, bottom to top:
+//! Layers, bottom to top (the first five are internal, hidden from the docs, and not covered by
+//! semver: the file readers `nbt`, `compress`, `region`, `chunk` and the loader `grid`, with the biome
+//! table `biomes`; the tests of this crate reach them):
 //!
-//! - [`nbt`], [`compress`], [`region`], [`level`]: the file formats, bounded (every length is checked
+//! - `nbt`, `compress`, `region`, [`level`]: the file formats, bounded (every length is checked
 //!   against the bytes that are there before anything is allocated from it);
-//! - [`chunk`]: a chunk's NBT to palettes and indices per 16 x 16 x 16 section (1.13 and later);
+//! - `chunk`: a chunk's NBT to palettes and indices per 16 x 16 x 16 section (1.13 and later);
 //! - [`save`]: a save folder, its dimensions and regions, and where saves live on a machine;
-//! - [`blocks`], [`biomes`]: block states baked once each (through [`crate::assets::Assets`]),
-//!   the cover rule and where the data says a block is tinted, biome colours from the jar's data;
-//! - [`grid`]: the blocks of a window of chunks in compact form, and the loader;
+//! - [`blocks`]: block states baked once each (through [`crate::assets::Assets`]), the cover rule
+//!   and where the data says a block is tinted; `biomes`: biome colours from the jar's data;
+//! - `grid`: the blocks of a window of chunks in compact form, and the loader;
 //! - [`mesher`]: the window to meshes, with face culling, tints and the [`mesher::WorldReport`] of
-//!   what was left out; [`crate::gltf::write_world`] writes it, [`scene`] (feature `bridge`) turns it
-//!   into a rewrite-bridge scene.
+//!   what was left out; [`crate::gltf::write_world`] writes it, and `scene` (feature `bridge`) turns
+//!   it into a rewrite-bridge scene.
+#[doc(hidden)]
 pub mod biomes;
 pub mod blocks;
+#[doc(hidden)]
 pub mod chunk;
+#[doc(hidden)]
 pub mod compress;
 #[cfg(test)]
 mod fuzz;
+#[doc(hidden)]
 pub mod grid;
 pub mod level;
 pub mod mesher;
+#[doc(hidden)]
 pub mod nbt;
+#[doc(hidden)]
 pub mod region;
 pub mod save;
 #[cfg(feature = "bridge")]

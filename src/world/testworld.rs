@@ -16,7 +16,7 @@ use crate::jar::testjar::{png, JarBuilder};
 /// A jar (1.21.4 and later layout: it has item definitions; with biome data and colormaps) holding:
 /// `stone`, `glass` (partly transparent), `grass_block` (tinted, and its item definition says grass),
 /// `oak_leaves` and `birch_leaves` (tinted; no item definition says what colours them), `oak_slab` (bottom, top, double), `water` and `chest` (no geometry),
-/// `fence` (multipart), and the biomes `plains`, `desert`, `swamp`
+/// `fence` (multipart), `many` (240 quads, none culled), and the biomes `plains`, `desert`, `swamp`
 pub fn world_jar() -> Assets {
     let tex = |c: u8| png(16, 16, move |_, _| [c, c, c, 255]);
     let glass = png(16, 16, |x, _| {
@@ -65,6 +65,25 @@ pub fn world_jar() -> Assets {
             f("east", false)
         )
     };
+    let many = {
+        let face = |d: &str| format!(r##""{d}":{{"texture":"#all"}}"##);
+        let faces = ["down", "up", "north", "south", "west", "east"]
+            .map(face)
+            .join(",");
+        let elements: Vec<String> = (0..40)
+            .map(|i| {
+                format!(
+                    r#"{{"from":[{},0,0],"to":[{},16,16],"faces":{{{faces}}}}}"#,
+                    i % 8,
+                    i % 8 + 8
+                )
+            })
+            .collect();
+        format!(
+            r##"{{"textures":{{"all":"block/stone"}},"elements":[{}]}}"##,
+            elements.join(",")
+        )
+    };
     let biome = |t: f64, d: f64, extra: &str| {
         format!(
             r##"{{"temperature":{t},"downfall":{d},"has_precipitation":true,"effects":{{"water_color":"#3f76e4"{extra}}}}}"##
@@ -80,6 +99,9 @@ pub fn world_jar() -> Assets {
             "assets/minecraft/items/oak_leaves.json",
             r#"{"model":{"type":"minecraft:model","model":"minecraft:block/oak_leaves","tints":[{"type":"minecraft:constant","value":-12012264}]}}"#,
         )
+        // a block of 240 quads that nothing culls: the budgets' test material
+        .add("assets/minecraft/blockstates/many.json", r#"{"variants":{"":{"model":"block/many"}}}"#)
+        .add("assets/minecraft/models/block/many.json", many)
         .add("assets/minecraft/blockstates/stone.json", r#"{"variants":{"":{"model":"block/stone"}}}"#)
         .add("assets/minecraft/blockstates/glass.json", r#"{"variants":{"":{"model":"block/glass"}}}"#)
         .add("assets/minecraft/blockstates/grass_block.json", r#"{"variants":{"snowy=false":{"model":"block/grass_block"},"snowy=true":{"model":"block/grass_block"}}}"#)

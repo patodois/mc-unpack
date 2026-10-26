@@ -1,7 +1,7 @@
 //! The text `list --states` and `inspect` print, built as lines so that it can be tested. Anything
 //! that came from a jar (a state key, a texture name, a note) is escaped with
 //! [`crate::jar::escape_control`], so that a hostile jar cannot rewrite a terminal. The names that
-//! [`crate::bridge`] gives (`Model::name`, `AssetInfo::name`) carry the raw state text instead:
+//! `crate::bridge` gives (`Model::name`, `AssetInfo::name`) carry the raw state text instead:
 //! they are for programs, which should escape what they print.
 
 use anyhow::Result;

@@ -187,6 +187,7 @@ pub fn to_blocks(
 
 /// What loading the chunks found
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct LoadStats {
     /// Chunks the region tables list inside the window
     pub listed: usize,
@@ -204,6 +205,10 @@ pub struct LoadStats {
     pub failed: Vec<(i32, i32, String)>,
     pub failed_count: usize,
     pub apron_failed: usize,
+    /// Region files that could not be opened (too short, not a file, unreadable): the first few
+    /// with why, and how many. Their chunks are missing; the rest still loads.
+    pub failed_regions: Vec<(i32, i32, String)>,
+    pub failed_regions_count: usize,
     /// Window chunks that store biomes as numbers
     pub numeric_biomes: usize,
     pub block_bytes: usize,
@@ -284,7 +289,16 @@ pub fn load(
             if !p.is_file() {
                 continue;
             }
-            let r = Region::open(&p)?;
+            let r = match Region::open(&p) {
+                Ok(r) => r,
+                Err(e) => {
+                    stats.failed_regions_count += 1;
+                    if stats.failed_regions.len() < 20 {
+                        stats.failed_regions.push((rx, rz, format!("{e:#}")));
+                    }
+                    continue;
+                }
+            };
             for lz in 0..32u32 {
                 for lx in 0..32u32 {
                     let (cx, cz) = (rx * 32 + lx as i32, rz * 32 + lz as i32);
@@ -305,7 +319,11 @@ pub fn load(
     }
     let mut grid = BlockGrid::new(ax0, az0, ax1, az1);
     for (rx, rz) in regions {
-        let mut r = Region::open(&region_dir.join(format!("r.{rx}.{rz}.mca")))?;
+        // opened a moment ago; if it changed since, it is a failed region like any other
+        let Ok(mut r) = Region::open(&region_dir.join(format!("r.{rx}.{rz}.mca"))) else {
+            stats.failed_regions_count += 1;
+            continue;
+        };
         for lz in 0..32u32 {
             for lx in 0..32u32 {
                 let (cx, cz) = (r.x * 32 + lx as i32, r.z * 32 + lz as i32);

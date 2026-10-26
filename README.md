@@ -316,7 +316,7 @@ bits), so a world that holds chunks of several versions reads. Regions are read 
 against the file; compression is zlib, gzip, none, and LZ4 (1.20.5 and later; the stream is lz4-java's block format, checked here
 against a block made by the `lz4` tool, and **not against a real LZ4 save: none exists on this machine**); a chunk too big for the
 file is read from its `c.<x>.<z>.mcc`. Chunks the game had not finished (`structure_starts`, `terrain`, `biomes`, `initialize_light`...;
-in the 26.3 saves here nearly half of them) are left out as the game regenerates them (`--include-unfinished` reads them as saved).
+in the 26.3 saves here nearly half of them) are left out as the game regenerates them (`--include-unfinished` reads them as saved). A chunk that fails to read, and a region file that cannot be opened (too short, not a file), are counted in the report with the reason and the rest still loads.
 
 **1.12.2 (and every save from before the flattening) is left out, on purpose.** A chunk there says `Blocks[i] = 98, Data[i] = 3`. Which
 block 98 is comes from the game's registration code (`Block.registerBlocks`), what 3 means from each block class's `getStateFromMeta`,
@@ -340,9 +340,9 @@ blockstate that lists weighted variants uses the first (the game picks by positi
 not mention ignores it. Block entities are their block's model and nothing else (no inventory, text or items): chests, banners,
 heads, shulker boxes and the like have none in the data and are left out and counted, like **fluids**: `water` and `lava` have an
 empty model (their shape, by level and flow, is code), so a lake is a hole and a waterlogged block is drawn without its water (counted).
-A block the jar has no blockstate for (another version's, a mod's) is listed as not in the jar. Air is not counted.
+A block the jar has no blockstate for (another version's, a mod's) is listed as not in the jar. Air is not counted. What the bake said about the blocks that were drawn (a state chosen because none was given, variants a partial state fits, properties the blockstate does not mention, faces left out) is counted in the report, per block and note.
 
-**Tints.** A biome tint is applied **only where the jar's data says the block takes it**, and the data says it in one place: a 26.x
+**Tints.** A biome tint is applied **only where the jar's data says the block takes it**, and the data says it in one place (and that one is an inference: the item definitions are the item's tints, and this crate reads an item's `minecraft:grass` tint as the same-named block's; in 26.3 it is six items, `bush`, `fern`, `grass_block`, `large_fern`, `short_grass` and `tall_grass`, so sugar cane and potted ferns, which the game also tints, stay untinted here): a 26.x
 item definition (`items/<name>.json`, 1.21.4 and later) whose `tints` hold a `minecraft:grass` entry makes the block of the same name
 (grass block, short and tall grass, ferns, `bush`...) take the grass colormap. That colour is looked up as the game does, in the
 jar's own `colormap/grass.png` and `worldgen/biome/*.json` (a biome's own `grass_color` included), at the biome of the block's
@@ -353,7 +353,7 @@ definitions, the water cauldron has no item definition of its own, and the biome
 block-to-tint mapping is in the game's code", with the count: oak, jungle, acacia and dark oak leaves, vines, the water cauldron,
 redstone dust, stems, the lily pad, spruce and birch leaves. In a jar with no item definitions (1.13 to 1.21.3) nothing is tinted at
 all, grass included, and the report says why. Also left out: the swamp and dark forest grass modifiers and the frozen temperature
-modifier (applied in code; the report names the biomes) and the blending of colours between neighbouring biomes. Biome colours need
+modifier (applied in code; the report names the biomes), the blending of colours between neighbouring biomes, and the game's seeded jitter of which 4 x 4 x 4 biome cell a block reads (this crate reads the cell the block is in). Biome colours need
 the biome data in the jar (1.20.1 and later; the 1.19.2 jar on the author's machine has none).
 
 **Scene and ids.** The Provider gives each region as a `Level` (`world/<save>/<x>,<z>`, then `?radius=n&chunks=x0,z0,x1,z1&y=min,max&dimension=d&unfinished=1`
@@ -368,7 +368,7 @@ let (scene, report) = mc.load_world_report("world/New World/0,0?chunks=0,0,7,7")
 for line in report.lines() { println!("{line}"); }                // what was left out, and why
 ```
 
-**Memory and limits.** Everything is capped and a window over a cap is refused with the number, never cut short:
+**Memory and limits.** What a save can make this crate hold is capped, and a window over a cap is refused with the number, never cut short. The quad cap is checked block by block, so a scene never holds more than the cap plus one block's quads (at most 1,040); every other cap is checked before the memory it guards is taken:
 
 | What | Limit |
 |------|-------|
@@ -377,7 +377,8 @@ for line in report.lines() { println!("{line}"); }                // what was le
 | quads in the scene (about 100 bytes each; 150 in a glTF) | 3,000,000 (`--max-quads`) |
 | one chunk, uncompressed / an external `.mcc` | 24 MiB / 32 MiB |
 | tags in one NBT document, nesting | 2,000,000, 128 |
-| distinct block states, biomes | 60,000, 4,096 |
+| distinct block states (keyed by the properties the blockstate mentions, and `waterlogged`), biomes | 60,000, 4,096 |
+| quads held by all the block states together (about 110 bytes each) | 2,000,000 |
 | a palette entry: name, a property, properties | 256, 128 bytes, 64 |
 
 Measured (release, this Mac): a whole region of 26.3 (about 400 finished chunks) takes 0.1 s and 125 MB; a synthetic region of 1,024
@@ -449,7 +450,7 @@ materials; options are the checker's, `--help` lists them; put `--mc-version` be
 **no errors and no warnings** (exit status 0); the same assets in bridge-testbed give a 1.000 x 1.000 x 1.000 m box for
 `block/stone`, identical to the Hytale block it is compared with (AABB `[-0.5, 0, -0.5]` to `[0.5, 1, 0.5]`).
 
-Tests: `cargo test` runs 222 unit tests on tiny synthetic jars and saves built in the tests (no game data anywhere; they include a zip
+Tests: `cargo test` runs 230 unit tests on tiny synthetic jars and saves built in the tests (no game data anywhere; they include a zip
 that lies about its size, PNGs over the limits, NBT with lengths past the file, region tables that point anywhere, and regions
 written chunk by chunk in the 1.13 and in the current layout) and 24 real-data tests
 in `tests/game_data.rs` that read the installed jars and skip, saying so, where a version is not installed. The real-data

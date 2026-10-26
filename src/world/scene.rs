@@ -4,7 +4,7 @@
 //!
 //! `world/<save>/<x>,<z>` names a region of a save: `<save>` is the save's folder name (when two
 //! saves share one, `<launcher instance>/<folder>`; [`crate::world::save::discover_saves`] makes
-//! the labels), `<x>,<z>` the region file's coordinates, `r.<x>.<z>.mca`. After a `?`, options
+//! the labels; a `?` or `%` in a label is written `%3F` or `%25`), `<x>,<z>` the region file's coordinates, `r.<x>.<z>.mca`. After a `?`, options
 //! joined by `&` narrow or widen it:
 //!
 //! | option | meaning |
@@ -106,7 +106,7 @@ impl WorldId {
             }
         }
         Ok(WorldId {
-            save: save.to_string(),
+            save: unescape_label(save),
             window: w,
             dimension,
             include_unfinished,
@@ -138,9 +138,21 @@ impl WorldId {
         };
         format!(
             "world/{}/{},{}{q}",
-            self.save, self.window.region.0, self.window.region.1
+            escape_label(&self.save),
+            self.window.region.0,
+            self.window.region.1
         )
     }
+}
+
+/// A save label in an id: `?` starts the options and `%` is the escape, so those two are written
+/// `%3F` and `%25` (a folder may be called anything the file system allows)
+pub fn escape_label(s: &str) -> String {
+    s.replace('%', "%25").replace('?', "%3F")
+}
+
+fn unescape_label(s: &str) -> String {
+    s.replace("%3F", "?").replace("%25", "%")
 }
 
 fn alpha(a: AlphaClass) -> AlphaMode {
@@ -224,6 +236,8 @@ mod tests {
             "world/26.3(1)/New World/-1,2?radius=1",
             "world/a/0,0?chunks=0,0,3,3&y=-64,20&dimension=the_nether&unfinished=1",
             "world/a/5,-7?dimension=pack:sky",
+            "world/what%3F/0,0?radius=2",
+            "world/100%25 sure/0,0",
         ] {
             let p = WorldId::parse(id).unwrap();
             let again = WorldId::parse(&p.to_id()).unwrap();
@@ -234,6 +248,22 @@ mod tests {
         assert_eq!(p.window.region, (-1, 2));
         assert_eq!(p.window.radius, 1);
         assert_eq!(p.to_id(), "world/26.3(1)/New World/-1,2?radius=1");
+        // a label with `?` or `%` in it
+        let q = WorldId::parse("world/what%3F 100%25/0,0?radius=1").unwrap();
+        assert_eq!(q.save, "what? 100%");
+        assert_eq!(q.to_id(), "world/what%3F 100%25/0,0?radius=1");
+        assert_eq!(
+            WorldId::parse(
+                &WorldId {
+                    save: "a?b%c".into(),
+                    ..q.clone()
+                }
+                .to_id()
+            )
+            .unwrap()
+            .save,
+            "a?b%c"
+        );
     }
 
     #[test]

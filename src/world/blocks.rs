@@ -144,7 +144,9 @@ pub struct StateEntry {
     pub fate: Fate,
     /// The state says `waterlogged=true`: the water is a fluid, which is left out
     pub waterlogged: bool,
-    /// Faces left out while baking (a missing texture slot), from the bake's own notes
+    /// What the bake said about this state: the entry used when none was given, the variants a
+    /// partial state fits, faces left out, properties the blockstate does not mention. The report
+    /// counts them.
     pub notes: Vec<String>,
 }
 
@@ -155,7 +157,15 @@ pub struct StateTable<'a> {
     pub textures: Vec<TexInfo>,
     tex_index: HashMap<String, u32>,
     known: HashSet<String>,
+    /// Quads held by all the states so far, and the most they may hold (a state is a copy of its
+    /// model's quads, and a hostile palette could ask for many)
+    state_quads: usize,
+    max_state_quads: usize,
 }
+
+/// Quads (about 110 bytes each) all the block states of one load may hold. The jars here need under
+/// 100,000 for a whole region.
+pub const MAX_STATE_QUADS: usize = 2_000_000;
 
 fn air_like(local: &str) -> bool {
     matches!(local, "air" | "cave_air" | "void_air")
@@ -181,37 +191,74 @@ impl<'a> StateTable<'a> {
             textures: Vec::new(),
             tex_index: HashMap::new(),
             known,
+            state_quads: 0,
+            max_state_quads: MAX_STATE_QUADS,
         }
+    }
+
+    /// A different budget of quads for all the states (the default is [`MAX_STATE_QUADS`])
+    pub fn with_quad_budget(mut self, n: usize) -> Self {
+        self.max_state_quads = n;
+        self
     }
 
     pub fn assets(&self) -> &Assets {
         self.assets
     }
 
-    /// The id of a block state, baking it the first time it is met
+    /// The id of a block state, baking it the first time it is met.
+    ///
+    /// States are keyed by what the blockstate file can tell apart: the properties it mentions, and
+    /// `waterlogged` (which the report counts). A palette that adds properties the file does not
+    /// mention, or any number of them, is the same state, so it cannot fill the table.
     pub fn resolve(&mut self, name: &str, props: &[(String, String)]) -> Result<u16> {
-        let key = (
-            name.to_string(),
-            props
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join(","),
-        );
-        if let Some(&id) = self.index.get(&key) {
-            return Ok(id);
-        }
         let local = name.strip_prefix("minecraft:");
         if let Some(l) = local {
             if air_like(l) {
-                self.index.insert(key, AIR);
                 return Ok(AIR);
             }
+        }
+        let waterlogged = props.iter().any(|(k, v)| k == "waterlogged" && v == "true");
+        let known_name = local.filter(|l| self.known.contains(*l));
+        let (kept, ignored): (Vec<(String, String)>, Vec<String>) =
+            match known_name.and_then(|l| self.assets.blockstate(l).ok()) {
+                Some(bs) => {
+                    let (k, ig) = bs.split_known(&State(props.iter().cloned().collect()));
+                    (k.0.into_iter().collect(), ig)
+                }
+                // not in the jar, or unreadable: one state for the name
+                None => (Vec::new(), Vec::new()),
+            };
+        let mut key_props = kept
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        if waterlogged && !kept.iter().any(|(k, _)| k == "waterlogged") {
+            key_props.push_str(";waterlogged=true");
+        }
+        let key = (name.to_string(), key_props);
+        if let Some(&id) = self.index.get(&key) {
+            return Ok(id);
         }
         if self.states.len() >= MAX_STATES {
             anyhow::bail!("the world uses more than {MAX_STATES} distinct block states");
         }
-        let entry = self.prepare(name, local, &key.1, props);
+        let entry = self.prepare(
+            name,
+            known_name.is_some(),
+            local.is_some(),
+            &kept,
+            ignored,
+            waterlogged,
+        );
+        if self.state_quads + entry.quads.len() > self.max_state_quads {
+            anyhow::bail!(
+                "the block states of the world need more than {} quads",
+                self.max_state_quads
+            );
+        }
+        self.state_quads += entry.quads.len();
         let id = self.states.len() as u16;
         self.states.push(entry);
         self.index.insert(key, id);
@@ -238,34 +285,41 @@ impl<'a> StateTable<'a> {
     fn prepare(
         &mut self,
         name: &str,
-        local: Option<&str>,
-        props_key: &str,
-        props: &[(String, String)],
+        in_jar: bool,
+        minecraft: bool,
+        kept: &[(String, String)],
+        ignored: Vec<String>,
+        waterlogged: bool,
     ) -> StateEntry {
         let mut e = StateEntry {
             name: Arc::from(name),
-            props: props_key.to_string(),
+            props: kept
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(","),
             quads: Vec::new(),
             covers: [false; 6],
             tint: None,
             fate: Fate::Drawn,
-            waterlogged: props.iter().any(|(k, v)| k == "waterlogged" && v == "true"),
+            waterlogged,
             notes: Vec::new(),
         };
-        let Some(local) = local else {
+        let local = name.strip_prefix("minecraft:").unwrap_or(name);
+        if !minecraft {
             e.fate = Fate::Unknown(format!(
                 "namespace of {name}: only `minecraft` blocks are in the client jar"
             ));
             return e;
-        };
-        if !self.known.contains(local) {
+        }
+        if !in_jar {
             e.fate = Fate::Unknown(format!(
                 "no blockstate `{local}` in the jar of Minecraft {}",
                 self.assets.version().id
             ));
             return e;
         }
-        let state = State(props.iter().cloned().collect());
+        let state = State(kept.iter().cloned().collect());
         let baked = match self.assets.bake_block(local, &state) {
             Ok(b) => b,
             Err(err) => {
@@ -284,6 +338,12 @@ impl<'a> StateTable<'a> {
             return e;
         }
         e.notes = baked.report.notes.clone();
+        if !ignored.is_empty() {
+            e.notes.push(format!(
+                "the blockstate does not mention {}: ignored",
+                ignored.join(", ")
+            ));
+        }
         let rule = data_tint(self.assets, local);
         for q in baked.quads() {
             let tex = match self.texture(&q.texture) {
@@ -475,6 +535,59 @@ mod tests {
         // a block with no geometry in the data is left out with a reason
         let ch = t.resolve("minecraft:chest", &[]).unwrap();
         assert!(matches!(t.states[ch as usize].fate, Fate::LeftOut(_)));
+    }
+
+    #[test]
+    fn properties_the_blockstate_does_not_mention_do_not_make_new_states() {
+        let a = crate::world::testworld::world_jar();
+        let mut t = StateTable::new(&a);
+        let first = t
+            .resolve("minecraft:stone", &[("junk0".into(), "x".into())])
+            .unwrap();
+        for i in 0..3000 {
+            let p = [(format!("junk{i}"), "x".to_string())];
+            assert_eq!(t.resolve("minecraft:stone", &p).unwrap(), first);
+        }
+        assert_eq!(t.states.len(), 2, "air and stone");
+        assert!(t.states[first as usize]
+            .notes
+            .iter()
+            .any(|n| n.contains("does not mention junk0")));
+        // unknown names are one state each, however many properties they carry
+        let u = t
+            .resolve("minecraft:nothing", &[("a".into(), "b".into())])
+            .unwrap();
+        assert_eq!(
+            u,
+            t.resolve("minecraft:nothing", &[("c".into(), "d".into())])
+                .unwrap()
+        );
+        // `waterlogged` is kept apart, the report counts it
+        let w = t
+            .resolve("minecraft:stone", &[("waterlogged".into(), "true".into())])
+            .unwrap();
+        assert_ne!(w, first);
+        assert!(t.states[w as usize].waterlogged);
+        // a property the file does mention does make a state
+        let b = t
+            .resolve("minecraft:oak_slab", &[("type".into(), "bottom".into())])
+            .unwrap();
+        let top = t
+            .resolve("minecraft:oak_slab", &[("type".into(), "top".into())])
+            .unwrap();
+        assert_ne!(b, top);
+    }
+
+    #[test]
+    fn the_states_of_one_load_share_a_budget_of_quads() {
+        let a = crate::world::testworld::world_jar();
+        let mut t = StateTable::new(&a).with_quad_budget(10);
+        t.resolve("minecraft:stone", &[]).unwrap();
+        let e = t.resolve("minecraft:glass", &[]).unwrap_err().to_string();
+        assert!(e.contains("more than 10 quads"), "{e}");
+        let mut t = StateTable::new(&a).with_quad_budget(100);
+        let e = t.resolve("minecraft:many", &[]).unwrap_err().to_string();
+        assert!(e.contains("more than 100 quads"), "{e}");
     }
 
     #[test]

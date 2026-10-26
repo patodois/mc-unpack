@@ -46,9 +46,9 @@
 //! those faces white unless the data says otherwise (26.x item definitions) or the caller supplies
 //! a [`TintSet`] with [`Minecraft::with_tints`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{anyhow, bail, Result};
 use rewrite_bridge::{
@@ -105,6 +105,9 @@ pub struct Minecraft {
     frame: Option<u32>,
     listing: OnceLock<Vec<AssetInfo>>,
     saves: Vec<SaveRef>,
+    /// The regions of each save, found once (reading every region's first chunks is not free);
+    /// `clear_world_cache` forgets them, for a save that changed
+    world_cache: Mutex<HashMap<std::path::PathBuf, Vec<AssetInfo>>>,
     world_limits: Limits,
 }
 
@@ -127,6 +130,7 @@ impl Minecraft {
             frame: None,
             listing: OnceLock::new(),
             saves: Vec::new(),
+            world_cache: Mutex::new(HashMap::new()),
             world_limits: Limits::default(),
         })
     }
@@ -172,7 +176,16 @@ impl Minecraft {
     /// the provider never looks for worlds on its own)
     pub fn with_saves(mut self, saves: Vec<SaveRef>) -> Self {
         self.saves = saves;
+        self.clear_world_cache();
         self
+    }
+
+    /// Forgets the regions found in the saves, so that the next `list` looks again (a save the game
+    /// has written to since)
+    pub fn clear_world_cache(&self) {
+        if let Ok(mut c) = self.world_cache.lock() {
+            c.clear();
+        }
     }
 
     /// The saves in the launchers' folders (see [`crate::world::save::discover_saves`])
@@ -209,50 +222,69 @@ impl Minecraft {
     pub fn world_listing(&self) -> Vec<AssetInfo> {
         let mut out = Vec::new();
         for s in &self.saves {
-            let Ok(w) = World::open(&s.path) else {
-                continue;
-            };
-            // a save from before the flattening (1.13) holds numeric block ids, which this does not read
-            if !w.level.data_version.is_some_and(|v| v >= FLATTENING) {
+            if let Some(hit) = self
+                .world_cache
+                .lock()
+                .ok()
+                .and_then(|c| c.get(&s.path).cloned())
+            {
+                out.extend(hit);
                 continue;
             }
-            let ver = w.level.version_name.clone().unwrap_or_else(|| "?".into());
-            for d in w.dimensions() {
-                let short = d.strip_prefix("minecraft:").unwrap_or(&d).to_string();
-                let Ok(regions) = w.regions(&d) else { continue };
-                let Ok(dir) = w.region_dir(&d) else { continue };
-                for (x, z) in regions {
-                    let file = dir.join(format!("r.{x}.{z}.mca"));
-                    // a region of chunks the game never finished shows nothing: not offered
-                    if !crate::world::grid::has_finished_chunk(&file) {
-                        continue;
-                    }
-                    let chunks = crate::world::region::Region::open(&file)
-                        .map(|r| r.chunk_count())
-                        .unwrap_or(0);
-                    let id = WorldId {
-                        save: s.label.clone(),
-                        window: mesher::Window::region(x, z),
-                        dimension: if short == "overworld" {
-                            "overworld".into()
-                        } else {
-                            short.clone()
-                        },
-                        include_unfinished: false,
-                    }
-                    .to_id();
-                    out.push(AssetInfo {
-                        name: format!(
-                            "{} {short} region {x},{z} ({chunks} chunks, Minecraft {ver})",
-                            s.label
-                        ),
-                        id,
-                        kind: AssetKind::Level,
-                    });
-                }
+            let found = Self::save_listing(s);
+            if let Ok(mut c) = self.world_cache.lock() {
+                c.insert(s.path.clone(), found.clone());
             }
+            out.extend(found);
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
+        out
+    }
+
+    fn save_listing(s: &SaveRef) -> Vec<AssetInfo> {
+        let mut out = Vec::new();
+        let Ok(w) = World::open(&s.path) else {
+            return out;
+        };
+        // a save from before the flattening (1.13) holds numeric block ids, which this does not read
+        if !w.level.data_version.is_some_and(|v| v >= FLATTENING) {
+            return out;
+        }
+        let ver = w.level.version_name.clone().unwrap_or_else(|| "?".into());
+        for d in w.dimensions() {
+            let short = d.strip_prefix("minecraft:").unwrap_or(&d).to_string();
+            let Ok(regions) = w.regions(&d) else { continue };
+            let Ok(dir) = w.region_dir(&d) else { continue };
+            for (x, z) in regions {
+                let file = dir.join(format!("r.{x}.{z}.mca"));
+                // a region of chunks the game never finished shows nothing: not offered
+                if !crate::world::grid::has_finished_chunk(&file) {
+                    continue;
+                }
+                let chunks = crate::world::region::Region::open(&file)
+                    .map(|r| r.chunk_count())
+                    .unwrap_or(0);
+                let id = WorldId {
+                    save: s.label.clone(),
+                    window: mesher::Window::region(x, z),
+                    dimension: if short == "overworld" {
+                        "overworld".into()
+                    } else {
+                        short.clone()
+                    },
+                    include_unfinished: false,
+                }
+                .to_id();
+                out.push(AssetInfo {
+                    name: format!(
+                        "{} {short} region {x},{z} ({chunks} chunks, Minecraft {ver})",
+                        s.label
+                    ),
+                    id,
+                    kind: AssetKind::Level,
+                });
+            }
+        }
         out
     }
 
@@ -866,5 +898,27 @@ mod tests {
             .unwrap()
             .is_empty());
         crate::world::testworld::cleanup(&save);
+    }
+
+    #[test]
+    fn the_regions_of_a_save_are_found_once() {
+        use crate::world::save::SaveRef;
+        use crate::world::testworld::*;
+        let mut a = ChunkSpec::new(0, 0);
+        a.set(1, 64, 1, "minecraft:stone", &[]);
+        let save = write_world("bridge-cache", "9.9", 9000, &[a], false);
+        let mc = Minecraft::from_assets(world_jar())
+            .unwrap()
+            .with_saves(vec![SaveRef {
+                label: "W".into(),
+                path: save.clone(),
+                instance: None,
+            }]);
+        assert_eq!(mc.list("world/").unwrap().len(), 1);
+        cleanup(&save);
+        // the save is gone and the listing is the one found before
+        assert_eq!(mc.list("world/").unwrap().len(), 1);
+        mc.clear_world_cache();
+        assert_eq!(mc.list("world/").unwrap().len(), 0);
     }
 }

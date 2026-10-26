@@ -122,8 +122,8 @@ impl Tag {
         }
     }
 
-    /// A short, bounded rendering for the `world-nbt` command: arrays are summarized, lists and
-    /// compounds are cut at `depth`
+    /// A short, bounded rendering for debugging output: arrays are summarized, lists and
+    /// compounds are cut at `depth`, text has its control characters replaced
     pub fn render(&self, depth: usize) -> String {
         fn clean(s: &str) -> String {
             s.chars()
@@ -295,7 +295,7 @@ impl<'a> Reader<'a> {
                         self.remaining()
                     );
                 }
-                let mut v = Vec::with_capacity(n);
+                let mut v = Vec::with_capacity(n.min(self.tags_left));
                 for _ in 0..n {
                     v.push(self.payload(et, depth + 1)?);
                 }
@@ -346,28 +346,41 @@ impl<'a> Reader<'a> {
     }
 }
 
-/// Java's "modified UTF-8" (NUL as C0 80, supplementary characters as surrogate pairs). Text that is
-/// plain UTF-8 reads as itself; anything else is decoded with replacement characters, which only
-/// matters for text the game would not write into a block name anyway.
+/// Java's "modified UTF-8": the text is UTF-16 code units written as one to three bytes each, NUL as
+/// `C0 80`, and a character outside the first plane as a surrogate pair of two three-byte units
+/// (CESU-8). Plain UTF-8 reads as itself; a byte that is none of these becomes U+FFFD.
 fn decode_mutf8(b: &[u8]) -> String {
-    match std::str::from_utf8(b) {
-        Ok(s) => s.to_string(),
-        Err(_) => {
-            // C0 80 is NUL; everything else falls through lossy
-            let mut fixed = Vec::with_capacity(b.len());
-            let mut i = 0;
-            while i < b.len() {
-                if b[i] == 0xC0 && b.get(i + 1) == Some(&0x80) {
-                    fixed.push(0);
-                    i += 2;
-                } else {
-                    fixed.push(b[i]);
-                    i += 1;
-                }
-            }
-            String::from_utf8_lossy(&fixed).into_owned()
+    if let Ok(s) = std::str::from_utf8(b) {
+        return s.to_string();
+    }
+    let mut units: Vec<u16> = Vec::with_capacity(b.len());
+    let cont = |i: usize| {
+        b.get(i)
+            .filter(|c| *c & 0xC0 == 0x80)
+            .map(|c| (*c & 0x3F) as u16)
+    };
+    let mut i = 0;
+    while i < b.len() {
+        let c = b[i];
+        if c < 0x80 {
+            units.push(c as u16);
+            i += 1;
+        } else if c & 0xE0 == 0xC0 && cont(i + 1).is_some() {
+            units.push(((c & 0x1F) as u16) << 6 | cont(i + 1).unwrap_or(0));
+            i += 2;
+        } else if c & 0xF0 == 0xE0 && cont(i + 1).is_some() && cont(i + 2).is_some() {
+            units.push(
+                ((c & 0x0F) as u16) << 12
+                    | cont(i + 1).unwrap_or(0) << 6
+                    | cont(i + 2).unwrap_or(0),
+            );
+            i += 3;
+        } else {
+            units.push(0xFFFD);
+            i += 1;
         }
     }
+    String::from_utf16_lossy(&units)
 }
 
 /// Parses a document: one named tag, as `level.dat` and a chunk are. Returns the name and the tag.
@@ -567,6 +580,30 @@ mod tests {
         // a list of unknown type
         let b = [9u8, 0, 0, 99, 0, 0, 0, 0];
         assert!(parse(&b).is_err());
+    }
+
+    #[test]
+    fn modified_utf8_surrogate_pairs_are_one_character() {
+        // U+1F600 as Java writes it: the surrogates D83D DE00, three bytes each
+        let mut b = vec![8u8, 0, 0, 0, 8];
+        b.extend_from_slice(&[b'a', 0xED, 0xA0, 0xBD, 0xED, 0xB8, 0x80, b'b']);
+        assert_eq!(parse(&b).unwrap().1.as_str(), Some("a\u{1F600}b"));
+        // a lone surrogate and a cut sequence are replacement characters, not errors
+        let b = [8u8, 0, 0, 0, 3, 0xED, 0xA0, 0xBD];
+        assert_eq!(parse(&b).unwrap().1.as_str(), Some("\u{FFFD}"));
+        let b = [8u8, 0, 0, 0, 2, b'x', 0xE2];
+        assert_eq!(parse(&b).unwrap().1.as_str(), Some("x\u{FFFD}"));
+    }
+
+    #[test]
+    fn a_list_does_not_reserve_more_than_the_tag_budget() {
+        // a million bytes of list items would be a million tags; the cap is far lower than a
+        // 24 MiB chunk's worth, and the reservation follows it
+        let mut b = vec![9u8, 0, 0, 1];
+        b.extend_from_slice(&(MAX_TAGS as i32 + 10).to_be_bytes());
+        b.extend(std::iter::repeat_n(0u8, MAX_TAGS + 10));
+        let e = parse(&b).unwrap_err().to_string();
+        assert!(e.contains("more than"), "{e}");
     }
 
     #[test]

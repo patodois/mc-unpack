@@ -199,6 +199,7 @@ impl WorldMesh {
 
 /// A block or a kind of block that is in the world and not in the scene
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct LeftOutBlock {
     pub name: String,
     pub reason: String,
@@ -207,7 +208,21 @@ pub struct LeftOutBlock {
     pub example: String,
 }
 
+/// Something the bake of a block's model said, and how many blocks of the scene it is about
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub struct BakeNote {
+    pub block: String,
+    /// The note as the baker writes it: `no state given: used the entry ...`, `the state fits 3
+    /// variants; the first ...`, `the blockstate does not mention ...: ignored`, a face left out
+    pub note: String,
+    pub blocks: u64,
+    /// One state of the block it came from
+    pub example: String,
+}
+
 #[derive(Clone, Debug, Default)]
+#[non_exhaustive]
 pub struct WorldReport {
     pub world: String,
     pub dimension: String,
@@ -232,6 +247,9 @@ pub struct WorldReport {
     pub left_out: Vec<LeftOutBlock>,
     /// Blocks the jar has no blockstate for (another version, a mod)
     pub unknown: Vec<LeftOutBlock>,
+    /// What baking the drawn blocks' models said (a state chosen for want of one given, variants
+    /// that fit, properties the blockstate ignores, faces left out), with the blocks it concerns
+    pub bake_notes: Vec<BakeNote>,
     /// Blocks with `waterlogged=true`: the block is drawn (if it has geometry), its water is not
     pub waterlogged: u64,
     /// Blocks whose faces have a colour from a biome colormap
@@ -293,8 +311,14 @@ impl WorldReport {
         }
         if self.load.legacy > 0 {
             v.push(format!(
-                "  {} chunk(s) with numeric block ids (before 1.13, data versions {:?}): left out; the id table and each block's data-value meaning are in the game's code",
-                self.load.legacy, self.load.legacy_versions
+                "  {} chunk(s) with numeric block ids (before 1.13, data version {}): left out; the id table and each block's data-value meaning are in the game's code",
+                self.load.legacy,
+                self.load
+                    .legacy_versions
+                    .iter()
+                    .map(|v| v.map(|v| v.to_string()).unwrap_or_else(|| "none".into()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ));
         }
         if self.load.failed_count > 0 {
@@ -304,6 +328,15 @@ impl WorldReport {
             ));
             for (x, z, e) in &self.load.failed {
                 v.push(format!("    chunk {x},{z}: {}", esc(e)));
+            }
+        }
+        if self.load.failed_regions_count > 0 {
+            v.push(format!(
+                "  {} region file(s) could not be opened (their chunks are missing):",
+                self.load.failed_regions_count
+            ));
+            for (x, z, e) in &self.load.failed_regions {
+                v.push(format!("    r.{x}.{z}.mca: {}", esc(e)));
             }
         }
         if self.load.apron_failed > 0 {
@@ -336,6 +369,24 @@ impl WorldReport {
                     esc(&l.name),
                     l.blocks,
                     esc(&l.reason)
+                ));
+            }
+        }
+        if !self.bake_notes.is_empty() {
+            v.push("what the models' bake said (blocks drawn all the same):".into());
+            for n in self.bake_notes.iter().take(LIST_LINES) {
+                v.push(format!(
+                    "  {} x{} [{}]: {}",
+                    esc(&n.block),
+                    n.blocks,
+                    esc(&n.example),
+                    esc(&n.note)
+                ));
+            }
+            if self.bake_notes.len() > LIST_LINES {
+                v.push(format!(
+                    "  ... and {} more",
+                    self.bake_notes.len() - LIST_LINES
                 ));
             }
         }
@@ -522,6 +573,7 @@ pub fn build(
     };
     let mut lo: BTreeMap<(String, String), LeftOutBlock> = BTreeMap::new();
     let mut unk: BTreeMap<(String, String), LeftOutBlock> = BTreeMap::new();
+    let mut notes: BTreeMap<(String, String), BakeNote> = BTreeMap::new();
     for (id, &n) in m.counts.iter().enumerate() {
         if n == 0 || id as u16 == AIR {
             continue;
@@ -534,6 +586,17 @@ pub fn build(
         let (map, reason) = match &st.fate {
             Fate::Drawn => {
                 report.blocks_drawn += n;
+                for note in &st.notes {
+                    let e = notes
+                        .entry((st.name.to_string(), note.clone()))
+                        .or_insert_with(|| BakeNote {
+                            block: st.name.to_string(),
+                            note: note.clone(),
+                            blocks: 0,
+                            example: st.props.clone(),
+                        });
+                    e.blocks += n;
+                }
                 continue;
             }
             Fate::Air => continue,
@@ -557,6 +620,16 @@ pub fn build(
     };
     report.left_out = sort(lo);
     report.unknown = sort(unk);
+    report.bake_notes = {
+        let mut v: Vec<BakeNote> = notes.into_values().collect();
+        v.sort_by(|a, b| {
+            b.blocks
+                .cmp(&a.blocks)
+                .then(a.block.cmp(&b.block))
+                .then(a.note.cmp(&b.note))
+        });
+        v
+    };
     if assets.layout() != crate::version::Layout::ModelsWithItemDefs {
         report.notes.push(
             "this jar has no item definitions (1.21.4 and later have them), the one place the data says which block takes the grass colormap: nothing is tinted by biome".into(),
@@ -657,6 +730,15 @@ impl Mesher<'_> {
                         if id == AIR {
                             continue;
                         }
+                        // checked block by block: one block is at most MAX_BAKE_QUADS quads, so a
+                        // scene never holds more than the cap and that
+                        if self.quads > self.max_quads {
+                            bail!(
+                                "the scene has more than {} quads (stopped at {} in chunk {cx},{cz}); use a smaller window (--chunks, --y, or a smaller --radius)",
+                                self.max_quads,
+                                self.quads
+                            );
+                        }
                         self.counts[id as usize] += 1;
                         let st = &table.states[id as usize];
                         if !matches!(st.fate, Fate::Drawn) {
@@ -744,8 +826,9 @@ impl Mesher<'_> {
         }
         if self.quads > self.max_quads {
             bail!(
-                "the scene has more than {} quads (at chunk {cx},{cz}); use a smaller window (--chunks, --y, or a smaller --radius)",
-                self.max_quads
+                "the scene has more than {} quads (stopped at {} in chunk {cx},{cz}); use a smaller window (--chunks, --y, or a smaller --radius)",
+                self.max_quads,
+                self.quads
             );
         }
         // vectors grown by doubling hold up to twice what they need; the whole scene is held at once
@@ -1164,6 +1247,85 @@ mod tests {
         // above and below the window, which are in the world
         assert_eq!(m.quad_count(), 3 * 4);
         assert_eq!(r.blocks, 3);
+    }
+
+    #[test]
+    fn the_quad_cap_is_checked_block_by_block() {
+        // one section of 4,096 blocks of 240 quads each is a million quads: the cap stops it within
+        // one block of the cap, not after the whole chunk
+        let mut c = ChunkSpec::new(0, 0);
+        c.fill((0, 64, 0), (15, 79, 15), "minecraft:many");
+        let save = write_world("mesher-block-cap", "9.9", 9000, &[c], false);
+        let a = world_jar();
+        let w = World::open(&save).unwrap();
+        let mut o = BuildOptions::new(Window::region(0, 0));
+        o.limits.max_quads = 5000;
+        let e = build(&a, &w, &o).unwrap_err().to_string();
+        cleanup(&save);
+        let reached: u64 = e
+            .split("stopped at ")
+            .nth(1)
+            .and_then(|r| r.split(' ').next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("{e}"));
+        assert!(reached > 5000 && reached <= 5000 + 240, "{e}");
+    }
+
+    #[test]
+    fn what_the_bake_said_is_counted_in_the_report() {
+        let mut c = ChunkSpec::new(0, 0);
+        // no state given for a block that has two: the first is used
+        c.set(1, 64, 1, "minecraft:grass_block", &[]);
+        c.set(2, 64, 1, "minecraft:grass_block", &[]);
+        // a property the blockstate does not mention
+        c.set(
+            3,
+            64,
+            1,
+            "minecraft:oak_slab",
+            &[("type", "bottom"), ("distance", "3")],
+        );
+        let (_, r) = one_chunk(&c);
+        let by = |block: &str, what: &str| {
+            r.bake_notes
+                .iter()
+                .find(|n| n.block == block && n.note.contains(what))
+                .unwrap_or_else(|| panic!("{:?}", r.bake_notes))
+        };
+        assert_eq!(by("minecraft:grass_block", "no state given").blocks, 2);
+        assert_eq!(
+            by("minecraft:oak_slab", "does not mention distance").blocks,
+            1
+        );
+        let text = r.lines().join("\n");
+        assert!(
+            text.contains("what the models' bake said") && text.contains("no state given"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_short_region_file_is_one_failed_region_not_a_failed_load() {
+        let mut a = ChunkSpec::new(0, 0);
+        a.set(1, 64, 1, "minecraft:stone", &[]);
+        let save = write_world("mesher-short", "9.9", 9000, &[a], false);
+        let rd = save.join("dimensions/minecraft/overworld/region");
+        std::fs::write(rd.join("r.0.1.mca"), vec![0u8; 5000]).unwrap();
+        std::fs::write(rd.join("r.1.0.mca"), vec![0u8; 100]).unwrap();
+        let assets = world_jar();
+        let w = World::open(&save).unwrap();
+        let mut win = Window::region(0, 0);
+        win.radius = 1;
+        let (m, r) = build(&assets, &w, &BuildOptions::new(win)).unwrap();
+        cleanup(&save);
+        assert_eq!(m.quad_count(), 6);
+        assert_eq!(r.load.failed_regions_count, 2);
+        assert_eq!(r.load.failed_regions.len(), 2);
+        let text = r.lines().join("\n");
+        assert!(
+            text.contains("2 region file(s) could not be opened") && text.contains("r.0.1.mca"),
+            "{text}"
+        );
     }
 
     #[test]
