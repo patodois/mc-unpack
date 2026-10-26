@@ -438,7 +438,7 @@ materials; options are the checker's, `--help` lists them; put `--mc-version` be
 **no errors and no warnings** (exit status 0); the same assets in bridge-testbed give a 1.000 x 1.000 x 1.000 m box for
 `block/stone`, identical to the Hytale block it is compared with (AABB `[-0.5, 0, -0.5]` to `[0.5, 1, 0.5]`).
 
-Tests: `cargo test` runs 220 unit tests on tiny synthetic jars and saves built in the tests (no game data anywhere; they include a zip
+Tests: `cargo test` runs 221 unit tests on tiny synthetic jars and saves built in the tests (no game data anywhere; they include a zip
 that lies about its size, PNGs over the limits, NBT with lengths past the file, region tables that point anywhere, and regions
 written chunk by chunk in the 1.13 and in the current layout) and 24 real-data tests
 in `tests/game_data.rs` that read the installed jars and skip, saying so, where a version is not installed. The real-data
@@ -455,7 +455,8 @@ once); the tint table agrees with the 26.x item definitions; a 1.12.2 save is re
 models; every region the provider lists is a scene the bridge's checker accepts (`check-conformance --with-worlds --kind level`: 12 of 12
 clean with rewrite-bridge 0.2.2); and damaged copies of a real region and of a real chunk never panic. The fuzz tests
 (`src/world/fuzz.rs`) flip, cut, splice and set to extremes the bytes of NBT, chunks, the three compressions, region files, whole
-loads and `level.dat`: 60,000 rounds per target in a release build and 25,000 in a debug one (with overflow checks) found no panic;
+loads and `level.dat`: 100,000 rounds per target in a release build and 25,000 in a debug one (with overflow checks) found no panic, nor did 3,000
+rounds each of damaged copies of a real region and of a real chunk (debug build);
 `MC_UNPACK_FUZZ=<rounds>` sets the count (400 by default). `cargo test --release -- --ignored stress --nocapture` builds the
 1,024-chunk regions of the paragraph above.
 
