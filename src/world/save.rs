@@ -162,7 +162,7 @@ pub struct SaveRef {
     /// What an id calls it: the folder name, or `instance/folder` when two saves share a folder name
     pub label: String,
     pub path: PathBuf,
-    /// The launcher instance it belongs to, where there is one (Prism)
+    /// The launcher instance it belongs to, where there is one
     pub instance: Option<String>,
 }
 
@@ -179,9 +179,9 @@ fn subdirs(dir: &Path) -> Vec<PathBuf> {
     v
 }
 
-/// Saves in the launchers' folders (read only): Prism's `instances/*/minecraft/saves` (and
-/// `.minecraft/saves`), the vanilla launcher's `saves`, and the folders in `MC_UNPACK_SAVES`
-/// (separated like `PATH`)
+/// Saves in the launchers' folders (read only): the vanilla launcher's `saves` and each instance's
+/// (Prism, MultiMC, the Modrinth App, ATLauncher, GDLauncher, the CurseForge app; see
+/// [`crate::install`] for where), and the folders in `MC_UNPACK_SAVES` (separated like `PATH`)
 pub fn discover_saves() -> Vec<SaveRef> {
     let mut found: Vec<(String, Option<String>, PathBuf)> = Vec::new();
     let mut add_dir = |saves: &Path, instance: Option<String>| {
@@ -195,19 +195,10 @@ pub fn discover_saves() -> Vec<SaveRef> {
             }
         }
     };
-    for prism in install::prism_dirs() {
-        for inst in subdirs(&prism.join("instances")) {
-            let iname = inst
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            for mc in ["minecraft", ".minecraft"] {
-                add_dir(&inst.join(mc).join("saves"), Some(iname.clone()));
-            }
+    for l in install::launcher_dirs() {
+        for (instance, saves) in install::save_folders_in(&l) {
+            add_dir(&saves, instance);
         }
-    }
-    for mc in install::minecraft_dirs() {
-        add_dir(&mc.join("saves"), None);
     }
     if let Some(extra) = std::env::var_os("MC_UNPACK_SAVES") {
         for d in std::env::split_paths(&extra) {

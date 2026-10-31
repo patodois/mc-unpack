@@ -150,7 +150,7 @@ impl Minecraft {
         match best {
             Some((a, _)) => Self::from_assets(a),
             None => bail!(
-                "no readable Minecraft client jar found (looked for Prism Launcher and vanilla launcher installs, and MC_UNPACK_JAR)"
+                "no readable Minecraft client jar found (looked for installs of the vanilla launcher, Prism Launcher, MultiMC, the Modrinth App, ATLauncher, GDLauncher and the CurseForge app, and MC_UNPACK_JAR)"
             ),
         }
     }

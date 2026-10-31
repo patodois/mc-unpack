@@ -190,7 +190,7 @@ fn selected_jars(cli: &Cli) -> Result<Vec<JarFile>> {
     }
     let all = find_jars();
     if all.is_empty() {
-        bail!("no Minecraft client jar found: looked in Prism Launcher's and the vanilla launcher's folders (see the README); pass --jar <path>");
+        bail!("no Minecraft client jar found: looked in the vanilla launcher's, Prism Launcher's, MultiMC's, the Modrinth App's, ATLauncher's, GDLauncher's and the CurseForge app's folders (see the README); pass --jar <path>");
     }
     if let Some(v) = &cli.mc_version {
         let m: Vec<JarFile> = all.into_iter().filter(|j| &j.version == v).collect();

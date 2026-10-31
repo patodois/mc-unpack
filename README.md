@@ -31,24 +31,37 @@ its data, is left out and listed under [What is left out](#what-is-left-out).
 
 ## What you need
 
-- **A Minecraft: Java Edition client jar**, from a launcher you installed it with. Looked for, read only, in:
+- **A Minecraft: Java Edition client jar**, from a launcher you installed it with. Looked for, read only, in the folders of
+  these launchers (macOS / Linux / Windows; every path of every system is tried, so a missing one is just skipped):
 
-  | Where | Path |
-  |-------|------|
-  | Prism Launcher, macOS | `~/Library/Application Support/PrismLauncher/libraries/com/mojang/minecraft/<v>/minecraft-<v>-client.jar` |
-  | Prism Launcher, Linux | `$XDG_DATA_HOME/PrismLauncher/...` (else `~/.local/share/PrismLauncher/...`), same layout |
-  | Prism Launcher, Windows | `%APPDATA%\PrismLauncher\libraries\com\mojang\minecraft\<v>\minecraft-<v>-client.jar` |
-  | Vanilla launcher, macOS | `~/Library/Application Support/minecraft/versions/<v>/<v>.jar` |
-  | Vanilla launcher, Linux | `~/.minecraft/versions/<v>/<v>.jar` |
-  | Vanilla launcher, Windows | `%APPDATA%\.minecraft\versions\<v>\<v>.jar` |
+  | Launcher | Folder |
+  |----------|--------|
+  | Vanilla launcher | `~/Library/Application Support/minecraft` / `~/.minecraft` (or Flatpak `~/.var/app/com.mojang.Minecraft/.minecraft`) / `%APPDATA%\.minecraft` |
+  | Prism Launcher | `~/Library/Application Support/PrismLauncher` / `$XDG_DATA_HOME/PrismLauncher` (else `~/.local/share/...`; or Flatpak) / `%APPDATA%\PrismLauncher` |
+  | MultiMC | `~/Library/Application Support/MultiMC` / `$XDG_DATA_HOME/multimc` / (none: it lives where it was unzipped, see `MC_UNPACK_LAUNCHER_DIR`) |
+  | Modrinth App | `ModrinthApp` (`com.modrinth.theseus` before version 0.8) in Application Support / `$XDG_DATA_HOME` (and `$XDG_CONFIG_HOME`, or Flatpak) / `%APPDATA%` |
+  | ATLauncher | `~/Library/Application Support/ATLauncher` or inside `ATLauncher.app/Contents/Java` / `$XDG_DATA_HOME/atlauncher` (or Flatpak) / `%APPDATA%\ATLauncher` |
+  | GDLauncher | `gdlauncher_carbon` (and `gdlauncher_next`) in Application Support / `$XDG_DATA_HOME` / `%APPDATA%` |
+  | CurseForge app | `~/Documents/curseforge/minecraft` / the same / `%USERPROFILE%\curseforge\minecraft` |
   | Anywhere | `--jar <path>` or `MC_UNPACK_JAR=<path>` |
 
-  `MC_UNPACK_PRISM_DIR` and `MC_UNPACK_MINECRAFT_DIR` replace the two launcher folders. Only the macOS Prism layout has been
-  tried by the author; the other paths are the launchers' documented defaults. A modded profile's jar (Fabric, Forge) holds no
-  assets and is refused with that message.
-- **For worlds, a save folder** of your own, from a launcher you installed the game with. Looked for, read only, in Prism's
-  `instances/*/minecraft/saves` (and `.minecraft/saves`), the vanilla launcher's `saves`, and the folders in `MC_UNPACK_SAVES`
-  (separated like `PATH`), or give the folder to `mc-unpack world`.
+  Inside a launcher's folder, the jar is where that launcher keeps it: `versions/<v>/<v>.jar` (vanilla, the CurseForge app's
+  `Install` folder, the Modrinth App's `meta` folder, and a mod loader's `versions/<v>-<loader>/`),
+  `libraries/com/mojang/minecraft/<v>/minecraft-<v>-client.jar` (Prism, MultiMC), `libraries/net/minecraft/client/<v>/client-<v>.jar`
+  (ATLauncher, GDLauncher), or the `mainJar` that `meta/net.minecraft/<v>.json` names (Prism, MultiMC).
+
+  `MC_UNPACK_PRISM_DIR` and `MC_UNPACK_MINECRAFT_DIR` replace those two launcher folders. `MC_UNPACK_LAUNCHER_DIR` adds
+  folders (separated like `PATH`) of any launcher, whichever layout they have. A folder inside a launcher's `instances`
+  (`profiles` for the Modrinth App) stands for the launcher folder above it, where the shared libraries are. Only the macOS
+  Prism layout has been tried on a real install by the author; the other launchers' layouts follow their public
+  documentation where it says (Prism, Modrinth App, GDLauncher, CurseForge app, MultiMC) and a list of launcher folders kept by
+  [Horizon](https://github.com/horizon-rust/horizon) (MIT) where not, and are tested on folders made for the purpose. A
+  modded profile's jar (Fabric, Forge) holds no assets and is refused with that message.
+- **For worlds, a save folder** of your own, from a launcher you installed the game with. Looked for, read only, in the
+  vanilla launcher's `saves` and in each instance's: `instances/*/minecraft/saves` (and `.minecraft/saves`) in Prism and
+  MultiMC, `profiles/*/saves` in the Modrinth App, `instances/*/saves` in ATLauncher, `instances/*/instance/saves` in
+  GDLauncher, `Instances/*/saves` in the CurseForge app, and the folders in `MC_UNPACK_SAVES` (separated like `PATH`), or give
+  the folder to `mc-unpack world`.
 - **Rust**, stable (edition 2021; written with 1.99; 1.88, the version `Cargo.toml` asks for, was checked with and without the `bridge` feature, and CI repeats that). A release build takes about 10 seconds with `-j 4`, plus the download of
   the dependencies.
 - **Disk and memory.** The jar is never extracted: the zip directory (5,000 to 15,000 entries, most of them classes) is read
