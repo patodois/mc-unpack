@@ -1,0 +1,1 @@
+{"model":{"type":"minecraft:condition","on_false":{"type":"minecraft:model","model":"item/x"}}}

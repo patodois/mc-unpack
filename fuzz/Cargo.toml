@@ -1,0 +1,100 @@
+[package]
+name = "mc-unpack-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+description = "cargo-fuzz targets for mc-unpack (nightly only; not part of the stable build or CI)"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Not a member of the root package: `cargo build` and `cargo test` at the repository root never see it
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+mc-unpack = { path = "..", default-features = false }
+zip = { version = "8", default-features = false }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+
+[profile.release]
+debug = 1
+# Overflow checks stay on in the fuzz build: an arithmetic overflow is a finding, as in a debug build
+overflow-checks = true
+debug-assertions = true
+
+[[bin]]
+name = "gen_seeds"
+path = "src/bin/gen_seeds.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "nbt_parse"
+path = "fuzz_targets/nbt_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "decompress"
+path = "fuzz_targets/decompress.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "region"
+path = "fuzz_targets/region.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "chunk"
+path = "fuzz_targets/chunk.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "level"
+path = "fuzz_targets/level.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jar"
+path = "fuzz_targets/jar.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "png"
+path = "fuzz_targets/png.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "json"
+path = "fuzz_targets/json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "assets"
+path = "fuzz_targets/assets.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "world"
+path = "fuzz_targets/world.rs"
+test = false
+doc = false
+bench = false
