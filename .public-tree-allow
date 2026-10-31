@@ -1,0 +1,2 @@
+# Exceptions to tools/check_public_tree.py, one per line with a reason.
+content:src/install.rs blob=5642354 # 9a90cc5 credited Horizon (launcher folder facts, no code) with its copyright line; 888c249 dropped the line
