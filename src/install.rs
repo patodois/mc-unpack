@@ -34,9 +34,9 @@
 //! here was tried on Linux or Windows; the other layouts are tested on folders made for the purpose,
 //! and each path says below how it is known.
 //!
-//! Layout facts collected with help from Horizon's launcher (<https://github.com/horizon-rust/horizon>,
-//! MIT, Copyright (c) 2026 Ludovic Marie and the Horizon contributors), which keeps a list of where
-//! launchers put their files. The code is this crate's own. Each launcher's own public documentation
+//! Layout facts collected with help from the launcher of Horizon
+//! (<https://github.com/horizon-rust/horizon>), which keeps a list of where launchers put their
+//! files; only those facts were taken, no code. The code is this crate's own. Each launcher's own public documentation
 //! was checked where it says something (cited at the folder, in `known_folders`); a path marked
 //! "Horizon only" is asserted by Horizon and by nothing else this crate could find.
 
@@ -113,7 +113,9 @@ fn layout(source: Source) -> Layout {
             instance_dirs: &["profiles"],
             game_dirs: &[""],
         },
-        // the instance folder is the game folder
+        // the instance folder is the game folder: no ATLauncher page says so, but instances that
+        // players committed to public repositories hold `instance.json` beside `saves/` and
+        // `config/` (Horizon's `launcher/src/other_launchers.rs` lists four)
         Source::AtLauncher => Layout {
             jar_bases: &[""],
             instance_dirs: &["instances"],
