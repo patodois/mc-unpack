@@ -82,9 +82,7 @@ The repository already had mutation tests in `src/world/fuzz.rs`; the coverage-g
 
 ## Uncertain / for the owner
 
-1. **Branch name.** The task says `cloud/fuzz-mc-unpack`; the session's git setup pinned me to
-   `claude/fuzz-mc-unpack-fny3xn` (already present on origin, and I was told not to push elsewhere).
-   The work is on that branch. If you want the other name, it is one `git push origin <sha>:refs/heads/cloud/fuzz-mc-unpack`.
+1. **Branch name.** The task named `cloud/fuzz-mc-unpack`; the session could push only `claude/fuzz-mc-unpack-fny3xn`. The owner confirmed from the local session that this branch replaces the `cloud/...` one.
 2. **CI lint on this toolchain.** `cargo clippy --all-targets -- -D warnings` fails *on `main` too*
    here (not caused by this branch): `src/lib.rs` allows `clippy::chunks_exact_to_as_chunks`, which
    the local stable (1.97) clippy reports as an unknown lint. `cargo fmt --check` and
