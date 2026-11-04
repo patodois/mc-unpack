@@ -19,6 +19,8 @@ of a copy you already own, and of the world saves you made with it:
 - **your own worlds** (`saves/<name>`, 1.13 and later): `level.dat`, the region files and their chunks, turned into a scene of
   the jar's baked blocks with hidden faces dropped and biome tints, see [Worlds](#worlds).
 
+**Adding this to a game.** Read the [guide to adding a game](https://github.com/patodois/rewrite-bridge/blob/main/docs/INTEGRATING.md) first. Here: the provider is `mc_unpack::bridge::Minecraft::open(client_jar)` (the `bridge` feature is on by default), or `open_default()`, which searches the known launchers' folders and `$MC_UNPACK_JAR`.
+
 It exists because the Rust crate for this, `minecraft-assets`, has not been touched since 2022 and stops at 1.18-era
 formats.
 
