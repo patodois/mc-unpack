@@ -468,8 +468,7 @@ mod region_coordinate_regression {
     use super::*;
     #[test]
     fn listing_extreme_region_coordinates_does_not_panic() {
-        let dir = std::path::PathBuf::from(std::env::var_os("TMPDIR").unwrap())
-            .join(format!("region-coordinate-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("region-coordinate-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         for x in [i32::MAX, i32::MIN, 0] {
             let path = dir.join(format!("r.{x}.0.mca"));
@@ -480,5 +479,6 @@ mod region_coordinate_regression {
             std::fs::write(&path, bytes).unwrap();
             assert!(!has_finished_chunk(&path));
         }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
