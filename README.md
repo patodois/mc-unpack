@@ -143,7 +143,7 @@ needs properties (redstone wire), it is the first state its own conditions descr
 the first entry that fits. Where this is visible:
 - `mc-unpack list <name> --states` marks the entry `block/<name>` builds, and `mc-unpack inspect <id>` prints the state
   used, what was ignored, every note and what was left out;
-- the Provider has no channel for notes (rewrite-bridge 0.2 has only the model), so it puts the answer in two names that
+- the Provider has no channel for notes (rewrite-bridge 0.3 has only the model), so it puts the answer in two names that
   it does control: `Model::name` is the id that reproduces the model (`block/oak_stairs?variant=facing=east,half=bottom,shape=inner_left`
   when no state was given), and `AssetInfo::name` in `list` is `oak_stairs [facing=east,half=bottom,shape=inner_left]` for a
   block with several states (the `id` stays `block/oak_stairs`). `Minecraft::load_report` returns the full notes.
@@ -256,14 +256,14 @@ averages `(83, 108, 51)`, which is plains grass `#91bd59` times 0.57, and the me
 
 ## Provider
 
-`mc_unpack::bridge::Minecraft` implements `rewrite_bridge::Provider` (rewrite-bridge `0.2`, from
-[crates.io](https://crates.io/crates/rewrite-bridge); every `0.2` requirement resolves to one copy, so `cargo tree -i
+`mc_unpack::bridge::Minecraft` implements `rewrite_bridge::Provider` (rewrite-bridge `0.3`, from
+[crates.io](https://crates.io/crates/rewrite-bridge); every `0.3` requirement resolves to one copy, so `cargo tree -i
 rewrite-bridge` should show one entry).
 
 ```toml
 [dependencies]
 mc-unpack = { git = "https://github.com/patodois/mc-unpack" }   # add rev = "<commit>" to pin it
-rewrite-bridge = "0.2"
+rewrite-bridge = "0.3"
 ```
 
 ```rust
@@ -494,7 +494,7 @@ bare palette names are left out (never drawn as the first state of a blockstate)
 independent record of where the blocks are, which checks the bit packing, the section order, negative heights and the x/z order at
 once: it says where blocks are, not which state they are in); the blocks that get a biome tint are exactly the ones whose 26.x item definition has a grass tint; a 1.12.2 save is reported as numeric ids and a 1.7.10 one as having no
 models; every region the provider lists is a scene the bridge's checker accepts (`check-conformance --with-worlds --kind level`: 12 of 12
-clean with rewrite-bridge 0.2.2); and damaged copies of a real region and of a real chunk never panic. The fuzz tests
+clean with rewrite-bridge 0.3.1); and damaged copies of a real region and of a real chunk never panic. The fuzz tests
 (`src/world/fuzz.rs`) flip, cut, splice and set to extremes the bytes of NBT, chunks, the three compressions, region files, whole
 loads and `level.dat`: 100,000 rounds per target in a release build and 25,000 in a debug one (with overflow checks) found no panic, nor did 3,000
 rounds each of damaged copies of a real region and of a real chunk (debug build);
