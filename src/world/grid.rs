@@ -244,7 +244,12 @@ pub fn has_finished_chunk(path: &Path) -> bool {
             let Ok((_, root)) = nbt::parse(&raw) else {
                 continue;
             };
-            let (cx, cz) = (r.x * 32 + lx as i32, r.z * 32 + lz as i32);
+            let Some(cx) = r.x.checked_mul(32).and_then(|x| x.checked_add(lx as i32)) else {
+                return false;
+            };
+            let Some(cz) = r.z.checked_mul(32).and_then(|z| z.checked_add(lz as i32)) else {
+                return false;
+            };
             if let Ok(c) = parse_chunk(&root, Some((cx, cz))) {
                 if is_finished(&c.status) {
                     return true;
@@ -455,5 +460,25 @@ mod tests {
         assert_eq!(region_span(31, 32), 0..=1);
         assert_eq!(region_span(-33, -32), -2..=-1);
         assert_eq!(region_span(-64, -33), -2..=-2);
+    }
+}
+
+#[cfg(test)]
+mod region_coordinate_regression {
+    use super::*;
+    #[test]
+    fn listing_extreme_region_coordinates_does_not_panic() {
+        let dir = std::path::PathBuf::from(std::env::var_os("TMPDIR").unwrap())
+            .join(format!("region-coordinate-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for x in [i32::MAX, i32::MIN, 0] {
+            let path = dir.join(format!("r.{x}.0.mca"));
+            let mut bytes = vec![0; 12288];
+            bytes[..4].copy_from_slice(&0x201u32.to_be_bytes());
+            bytes[8192..8196].copy_from_slice(&5u32.to_be_bytes());
+            bytes[8196..8201].copy_from_slice(&[3, 10, 0, 0, 0]);
+            std::fs::write(&path, bytes).unwrap();
+            assert!(!has_finished_chunk(&path));
+        }
     }
 }
