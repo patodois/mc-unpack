@@ -503,4 +503,43 @@ mod region_coordinate_regression {
             assert!(!has_finished_chunk(&path));
         }
     }
+    #[test]
+    fn finished_chunks_in_nonzero_z_regions_are_found_at_their_coordinates() {
+        struct Temp(std::path::PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp =
+            Temp(std::env::temp_dir().join(format!("region-finished-z-{}", std::process::id())));
+        std::fs::create_dir_all(&temp.0).unwrap();
+        for z in [-2i32, 2] {
+            let (lx, lz) = (3usize, 7usize);
+            let mut raw = vec![10, 0, 0];
+            for (name, value) in [("xPos", lx as i32), ("zPos", z * 32 + lz as i32)] {
+                raw.push(3);
+                raw.extend_from_slice(&(name.len() as u16).to_be_bytes());
+                raw.extend_from_slice(name.as_bytes());
+                raw.extend_from_slice(&value.to_be_bytes());
+            }
+            raw.extend_from_slice(&[8, 0, 6]);
+            raw.extend_from_slice(b"Status");
+            raw.extend_from_slice(&14u16.to_be_bytes());
+            raw.extend_from_slice(b"minecraft:full");
+            raw.push(0);
+            let mut file = vec![0; 12288];
+            let index = (lz * 32 + lx) * 4;
+            file[index..index + 4].copy_from_slice(&0x201u32.to_be_bytes());
+            file[8192..8196].copy_from_slice(&((raw.len() + 1) as u32).to_be_bytes());
+            file[8196] = 3;
+            file[8197..8197 + raw.len()].copy_from_slice(&raw);
+            let path = temp.0.join(format!("r.0.{z}.mca"));
+            std::fs::write(&path, file).unwrap();
+            assert!(
+                has_finished_chunk(&path),
+                "finished chunk at Z={z} was not found"
+            );
+        }
+    }
 }
