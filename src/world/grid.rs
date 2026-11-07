@@ -535,10 +535,22 @@ mod region_coordinate_regression {
             file[8196] = 3;
             file[8197..8197 + raw.len()].copy_from_slice(&raw);
             let path = temp.0.join(format!("r.0.{z}.mca"));
-            std::fs::write(&path, file).unwrap();
+            std::fs::write(&path, &file).unwrap();
             assert!(
                 has_finished_chunk(&path),
                 "finished chunk at Z={z} was not found"
+            );
+            let status_start = 8197 + raw.len() - 15;
+            let mut unfinished = file.clone();
+            unfinished[status_start..status_start + 14].copy_from_slice(b"minecraft:base");
+            std::fs::write(&path, unfinished).unwrap();
+            assert!(!has_finished_chunk(&path), "unfinished status was accepted");
+            let z_at = 8197 + raw.windows(4).position(|w| w == b"zPos").unwrap() + 4;
+            file[z_at..z_at + 4].copy_from_slice(&(z * 32 + lz as i32 + 1).to_be_bytes());
+            std::fs::write(&path, file).unwrap();
+            assert!(
+                !has_finished_chunk(&path),
+                "chunk coordinates from another slot were accepted"
             );
         }
     }
