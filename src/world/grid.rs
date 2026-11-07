@@ -492,7 +492,7 @@ mod region_coordinate_regression {
         let temp =
             Temp(std::env::temp_dir().join(format!("region-z-coordinate-{}", std::process::id())));
         let dir = &temp.0;
-        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::create_dir_all(dir).unwrap();
         for z in [i32::MIN, i32::MAX] {
             let path = dir.join(format!("r.0.{z}.mca"));
             let mut bytes = vec![0; 12288];
