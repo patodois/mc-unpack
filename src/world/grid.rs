@@ -481,4 +481,26 @@ mod region_coordinate_regression {
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
+    #[test]
+    fn listing_extreme_z_coordinates_does_not_panic() {
+        struct Temp(std::path::PathBuf);
+        impl Drop for Temp {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp =
+            Temp(std::env::temp_dir().join(format!("region-z-coordinate-{}", std::process::id())));
+        let dir = &temp.0;
+        std::fs::create_dir_all(&dir).unwrap();
+        for z in [i32::MIN, i32::MAX] {
+            let path = dir.join(format!("r.0.{z}.mca"));
+            let mut bytes = vec![0; 12288];
+            bytes[..4].copy_from_slice(&0x201u32.to_be_bytes());
+            bytes[8192..8196].copy_from_slice(&5u32.to_be_bytes());
+            bytes[8196..8201].copy_from_slice(&[3, 10, 0, 0, 0]);
+            std::fs::write(&path, bytes).unwrap();
+            assert!(!has_finished_chunk(&path));
+        }
+    }
 }
