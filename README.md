@@ -143,7 +143,7 @@ needs properties (redstone wire), it is the first state its own conditions descr
 the first entry that fits. Where this is visible:
 - `mc-unpack list <name> --states` marks the entry `block/<name>` builds, and `mc-unpack inspect <id>` prints the state
   used, what was ignored, every note and what was left out;
-- the Provider has no channel for notes (rewrite-bridge 0.3 has only the model), so it puts the answer in two names that
+- the Provider has no channel for notes (rewrite-bridge 0.4 has only the model), so it puts the answer in two names that
   it does control: `Model::name` is the id that reproduces the model (`block/oak_stairs?variant=facing=east,half=bottom,shape=inner_left`
   when no state was given), and `AssetInfo::name` in `list` is `oak_stairs [facing=east,half=bottom,shape=inner_left]` for a
   block with several states (the `id` stays `block/oak_stairs`). `Minecraft::load_report` returns the full notes.
@@ -256,14 +256,14 @@ averages `(83, 108, 51)`, which is plains grass `#91bd59` times 0.57, and the me
 
 ## Provider
 
-`mc_unpack::bridge::Minecraft` implements `rewrite_bridge::Provider` (rewrite-bridge `0.3`, from
-[crates.io](https://crates.io/crates/rewrite-bridge); every `0.3` requirement resolves to one copy, so `cargo tree -i
+`mc_unpack::bridge::Minecraft` implements `rewrite_bridge::Provider` (rewrite-bridge `0.4`, from
+[crates.io](https://crates.io/crates/rewrite-bridge); every `0.4` requirement resolves to one copy, so `cargo tree -i
 rewrite-bridge` should show one entry).
 
 ```toml
 [dependencies]
 mc-unpack = { git = "https://github.com/patodois/mc-unpack" }   # add rev = "<commit>" to pin it
-rewrite-bridge = "0.3"
+rewrite-bridge = "0.4"
 ```
 
 ```rust
@@ -555,6 +555,13 @@ content and are not in this repository.
   finished (unless asked); LZ4 against a real save (none here); every version but 26.3 against a real save (none here).
 - **Blockstate properties are not enumerated**: the property list comes from the file (`list --states`), not from the game's
   block classes, so a state with a property the file never mentions (`power`, `waterlogged`) selects the same model.
+
+## Changes in 0.5.0
+
+- The `bridge` feature now uses rewrite-bridge 0.4. Nothing in the provider changed; a program that also depends on
+  rewrite-bridge has to ask for `"0.4"` so the build holds one copy.
+- No public item changed. Listing the chunks of a region file whose coordinates are at the edge of the number range now
+  reports the chunk as absent instead of overflowing.
 
 ## Legal
 

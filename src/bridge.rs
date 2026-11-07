@@ -334,7 +334,7 @@ impl Minecraft {
             );
         }
         let groups = mesh::build(&self.assets, &baked, &self.mesh_options())?;
-        // rewrite-bridge 0.3 has no channel for notes, so the name carries what a caller most needs:
+        // rewrite-bridge 0.4 has no channel for notes, so the name carries what a caller most needs:
         // the id that reproduces this exact model, with the state that was chosen for it
         let name = match &baked.report.state_used {
             // whenever the state was not fully given (none, or a partial one that fit several
