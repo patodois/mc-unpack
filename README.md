@@ -494,7 +494,7 @@ bare palette names are left out (never drawn as the first state of a blockstate)
 independent record of where the blocks are, which checks the bit packing, the section order, negative heights and the x/z order at
 once: it says where blocks are, not which state they are in); the blocks that get a biome tint are exactly the ones whose 26.x item definition has a grass tint; a 1.12.2 save is reported as numeric ids and a 1.7.10 one as having no
 models; every region the provider lists is a scene the bridge's checker accepts (`check-conformance --with-worlds --kind level`: 12 of 12
-clean with rewrite-bridge 0.3.1); and damaged copies of a real region and of a real chunk never panic. The fuzz tests
+clean in a historical measurement with rewrite-bridge 0.3.1); and damaged copies of a real region and of a real chunk never panic. The fuzz tests
 (`src/world/fuzz.rs`) flip, cut, splice and set to extremes the bytes of NBT, chunks, the three compressions, region files, whole
 loads and `level.dat`: 100,000 rounds per target in a release build and 25,000 in a debug one (with overflow checks) found no panic, nor did 3,000
 rounds each of damaged copies of a real region and of a real chunk (debug build);
