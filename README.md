@@ -1,5 +1,7 @@
 # mc-unpack
 
+mc-unpack reads Minecraft: Java Edition block models, item models, textures and world saves from the user's own files for asset-tool and game-rewrite developers.
+
 **NOT AN OFFICIAL MINECRAFT PRODUCT. NOT APPROVED BY OR ASSOCIATED WITH MOJANG OR MICROSOFT.**
 
 [![rewrite-bridge on crates.io](https://img.shields.io/crates/v/rewrite-bridge.svg?label=rewrite-bridge)](https://crates.io/crates/rewrite-bridge)
