@@ -47,13 +47,17 @@ its data, is left out and listed under [What is left out](#what-is-left-out).
   | ATLauncher | `~/Library/Application Support/ATLauncher` or inside `ATLauncher.app/Contents/Java` / `$XDG_DATA_HOME/atlauncher` (or Flatpak) / `%APPDATA%\ATLauncher` |
   | GDLauncher | `gdlauncher_carbon` (and `gdlauncher_next`) in Application Support / `$XDG_DATA_HOME` / `%APPDATA%` |
   | CurseForge app | `~/Documents/curseforge/minecraft` / the same / `%USERPROFILE%\curseforge\minecraft` |
-  | Anywhere | `--jar <path>` or `MC_UNPACK_JAR=<path>` |
+  | Anywhere | `--jar <path>` (that jar only) or `MC_UNPACK_JAR=<path>` (one more jar, and the one read by default) |
 
   Inside a launcher's folder, the jar is where that launcher keeps it: `versions/<v>/<v>.jar` (vanilla, the CurseForge app's
   `Install` folder, the Modrinth App's `meta` folder, and a mod loader's `versions/<v>-<loader>/`),
   `libraries/com/mojang/minecraft/<v>/minecraft-<v>-client.jar` (Prism, MultiMC), `libraries/net/minecraft/client/<v>/client-<v>.jar`
   (ATLauncher, GDLauncher), or the `mainJar` that `meta/net.minecraft/<v>.json` names (Prism, MultiMC).
 
+  `MC_UNPACK_JAR` adds one jar to those found, wherever it is kept (`mc-unpack versions` lists it with the rest; its
+  version is what its path spells, else what the jar's own `version.json` says). A command that reads one jar, and
+  `Minecraft::open_default`, read that jar when it is set and fully supported, and otherwise the newest fully supported
+  one; `--jar` and `--mc-version` still pick another, and `world` still reads a save with the jar of the save's version.
   `MC_UNPACK_PRISM_DIR` and `MC_UNPACK_MINECRAFT_DIR` replace those two launcher folders. `MC_UNPACK_LAUNCHER_DIR` adds
   folders (separated like `PATH`) of any launcher, whichever layout they have. A folder inside a launcher's `instances`
   (`profiles` for the Modrinth App) stands for the launcher folder above it, where the shared libraries are. Only the macOS
@@ -110,7 +114,14 @@ work by the same rules. The version id is read from `version.json` when there is
 ```sh
 cargo build --release                       # the `bridge` feature (Provider) is on by default
 cargo build --release --no-default-features # readers, glTF export, `check`; no rewrite-bridge
+```
 
+glTF export is always built; the `bridge` feature adds the rewrite-bridge provider, `check-bridge` and
+`check-conformance`. The program is then `target/release/mc-unpack`. The commands below call it `mc-unpack`: run
+`cargo install --path .` to put it on your `PATH` (in `~/.cargo/bin`), or write `./target/release/mc-unpack` (or
+`cargo run --release --`) in its place.
+
+```sh
 mc-unpack versions                          # the jars found, and what is supported for each
 mc-unpack list stairs                       # ids of blocks and items that draw something
 mc-unpack list oak_stairs --blocks --states # and the states of each block
@@ -130,8 +141,8 @@ mc-unpack check-bridge                      # load everything through the Provid
 mc-unpack check-conformance --filter stairs # the bridge's conformance checker
 ```
 
-`--mc-version <v>` picks one installed version; without it, commands that read one jar use the newest fully supported
-one. `--jar <path>` reads any jar. Output of `model` is `<name>.gltf`, `<name>.bin` and one PNG per distinct image
+`--mc-version <v>` picks one installed version; without it, commands that read one jar use the jar `MC_UNPACK_JAR`
+names if it is set and fully supported, else the newest fully supported one. `--jar <path>` reads any jar. Output of `model` is `<name>.gltf`, `<name>.bin` and one PNG per distinct image
 (`--name` sets the stem, `--frame N` picks a sheet frame of animated textures instead of the first one the animation
 shows, `--corner-origin` keeps the game's origin).
 
@@ -488,7 +499,7 @@ materials; options are the checker's, `--help` lists them; put `--mc-version` be
 **no errors and no warnings** (exit status 0); the same assets in bridge-testbed give a 1.000 x 1.000 x 1.000 m box for
 `block/stone`, identical to the Hytale block it is compared with (AABB `[-0.5, 0, -0.5]` to `[0.5, 1, 0.5]`).
 
-Tests: `cargo test` runs 232 unit tests on tiny synthetic jars and saves built in the tests (no game data anywhere; they include a zip
+Tests: `cargo test` runs 261 unit tests (242 without the `bridge` feature) on tiny synthetic jars and saves built in the tests (no game data anywhere; they include a zip
 that lies about its size, PNGs over the limits, NBT with lengths past the file, region tables that point anywhere, and regions
 written chunk by chunk in the 1.13 and in the current layout). It reads no install and no save, and writes only to the
 target folder and to the system temp folder (the synthetic jars and saves).

@@ -30,7 +30,8 @@
 //! launchers; `MC_UNPACK_LAUNCHER_DIR` adds folders (separated like `PATH`) of any launcher, for one
 //! kept somewhere else (MultiMC on macOS and Windows has no default). A folder inside a launcher's
 //! `instances` stands for the launcher folder above it, where the shared libraries are.
-//! `MC_UNPACK_JAR` adds a jar. Only the macOS Prism layout has been tried by the author, and nothing
+//! `MC_UNPACK_JAR` adds a jar, wherever it is, and that jar is the one read when nothing names a
+//! version ([`by_preference`]). Only the macOS Prism layout has been tried by the author, and nothing
 //! here was tried on Linux or Windows; the other layouts are tested on folders made for the purpose,
 //! and each path says below how it is known.
 //!
@@ -566,19 +567,55 @@ pub fn save_folders_in(l: &LauncherDir) -> Vec<(Option<String>, PathBuf)> {
     unique
 }
 
-/// Every jar found in the usual places, sorted by version name then source
+/// The jar `MC_UNPACK_JAR` names, when it is set
+pub fn env_jar() -> Option<PathBuf> {
+    std::env::var_os("MC_UNPACK_JAR")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+}
+
+/// A jar given by its path, as `MC_UNPACK_JAR` gives one. Its version is the one the path spells
+/// (`.../26.3/client.jar`), else the id in the jar's own `version.json`, so that a jar kept under
+/// any name is still found by its version.
+pub fn explicit_jar(path: &Path) -> JarFile {
+    let version = crate::version::id_from_path(path)
+        .or_else(|| {
+            let jar = crate::jar::Jar::open(path).ok()?;
+            let id = crate::version::read_version_json(&jar)?.id?;
+            Some(crate::jar::escape_control(&id))
+        })
+        .unwrap_or_else(|| "unknown".into());
+    JarFile {
+        version,
+        path: path.to_path_buf(),
+        source: Source::Explicit,
+    }
+}
+
+/// The order in which one jar is picked from those found (`found`, as [`find_jars`] sorts them)
+/// when nothing names a version: the jar `MC_UNPACK_JAR` names first (`preferred`), then the
+/// others from the newest version down. The caller takes the first it can read.
+pub fn by_preference(mut found: Vec<JarFile>, preferred: Option<&Path>) -> Vec<JarFile> {
+    found.reverse();
+    // stable: the others keep their order
+    found.sort_by_key(|j| preferred != Some(j.path.as_path()));
+    found
+}
+
+/// Every jar found, in the order a command that reads one jar tries them (see [`by_preference`])
+pub fn jars_by_preference() -> Vec<JarFile> {
+    by_preference(find_jars(), env_jar().as_deref())
+}
+
+/// Every jar found in the usual places and the one `MC_UNPACK_JAR` names, sorted by version name
+/// then source
 pub fn find_jars() -> Vec<JarFile> {
     let mut out = Vec::new();
     for l in launcher_dirs() {
         out.extend(jars_in(&l));
     }
-    if let Some(p) = std::env::var_os("MC_UNPACK_JAR") {
-        let path = PathBuf::from(p);
-        out.push(JarFile {
-            version: crate::version::id_from_path(&path).unwrap_or_else(|| "unknown".into()),
-            path,
-            source: Source::Explicit,
-        });
+    if let Some(path) = env_jar() {
+        out.push(explicit_jar(&path));
     }
     out.sort_by(|a, b| {
         version_key(&a.version)
@@ -877,6 +914,75 @@ mod tests {
         };
         assert_eq!(jars_in(&l).len(), 1);
         assert_eq!(save_folders_in(&l).len(), 1);
+        fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn the_jar_the_environment_names_is_tried_first_and_known_by_its_own_version() {
+        use crate::jar::testjar::JarBuilder;
+        let d = temp_dir("install-env");
+        let jar = |source: Source, version: &str, path: &str| JarFile {
+            version: version.into(),
+            path: d.join(path),
+            source,
+        };
+        // as `find_jars` sorts them: by version, and a jar whose version is unknown first
+        let found = vec![
+            jar(Source::Explicit, "unknown", "kept/client.jar"),
+            jar(Source::Vanilla, "1.12.2", "versions/1.12.2/1.12.2.jar"),
+            jar(
+                Source::Prism,
+                "1.21.1",
+                "libraries/minecraft-1.21.1-client.jar",
+            ),
+            jar(Source::Prism, "26.3", "libraries/minecraft-26.3-client.jar"),
+        ];
+        let order = |preferred: Option<&Path>| -> Vec<String> {
+            by_preference(found.clone(), preferred)
+                .into_iter()
+                .map(|j| j.version)
+                .collect()
+        };
+        // nothing named: the newest first, as before
+        assert_eq!(order(None), ["26.3", "1.21.1", "1.12.2", "unknown"]);
+        // the named jar first, whatever its version says, then the others newest first
+        assert_eq!(
+            order(Some(&d.join("kept/client.jar"))),
+            ["unknown", "26.3", "1.21.1", "1.12.2"]
+        );
+        assert_eq!(
+            order(Some(&d.join("versions/1.12.2/1.12.2.jar"))),
+            ["1.12.2", "26.3", "1.21.1", "unknown"]
+        );
+        assert_eq!(order(Some(&d.join("nowhere.jar")))[0], "26.3");
+
+        // its version: what the path spells, else what the jar itself says, else unknown
+        let write = |rel: &str, files: &[(&str, &str)]| {
+            let mut b = JarBuilder::new();
+            for (name, text) in files {
+                b = b.add(name, text);
+            }
+            let path = d.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b.build_bytes()).unwrap();
+            path
+        };
+        let state = ("assets/minecraft/blockstates/x.json", "{}");
+        let named = write(
+            "kept/client.jar",
+            &[state, ("version.json", r#"{"id":"9.9"}"#)],
+        );
+        let e = explicit_jar(&named);
+        assert_eq!((e.version.as_str(), e.source), ("9.9", Source::Explicit));
+        assert_eq!(e.path, named);
+        let spelled = write(
+            "1.20.1/client.jar",
+            &[state, ("version.json", r#"{"id":"9.9"}"#)],
+        );
+        assert_eq!(explicit_jar(&spelled).version, "1.20.1");
+        let silent = write("kept/other.jar", &[state]);
+        assert_eq!(explicit_jar(&silent).version, "unknown");
+        assert_eq!(explicit_jar(&d.join("kept/missing.jar")).version, "unknown");
         fs::remove_dir_all(&d).unwrap();
     }
 

@@ -202,13 +202,15 @@ fn selected_jars(cli: &Cli) -> Result<Vec<JarFile>> {
     Ok(all)
 }
 
-/// The one jar a single-jar command reads: the explicit or named one, else the newest that is fully supported
+/// The one jar a single-jar command reads: the explicit or named one, else the one `MC_UNPACK_JAR`
+/// names, else the newest, taking the first that is fully supported
 fn one_assets(cli: &Cli) -> Result<Assets> {
     let jars = selected_jars(cli)?;
     if cli.jar.is_some() || cli.mc_version.is_some() {
         return Assets::open(&jars[0].path);
     }
-    for j in jars.iter().rev() {
+    let preferred = mc_unpack::install::env_jar();
+    for j in &mc_unpack::install::by_preference(jars, preferred.as_deref()) {
         if let Ok(a) = Assets::open(&j.path) {
             if a.version().support() == Support::Full {
                 eprintln!(

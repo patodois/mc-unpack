@@ -58,7 +58,7 @@ use rewrite_bridge::{
 
 pub use crate::assets::AssetId;
 use crate::assets::{Assets, BakedModel, LeftOut};
-use crate::install::{find_jars, JarFile};
+use crate::install::JarFile;
 use crate::mesh::{self, MeshOptions, Origin};
 use crate::texture::AlphaClass;
 use crate::tint::TintSet;
@@ -135,24 +135,24 @@ impl Minecraft {
         })
     }
 
-    /// Opens the newest installed version this crate can read (`MC_UNPACK_JAR` first when set)
+    /// Opens the jar `MC_UNPACK_JAR` names when it is set and this crate can read it, else the
+    /// newest installed version it can read
     pub fn open_default() -> Result<Minecraft> {
-        let jars = find_jars();
-        let mut best: Option<(Assets, &JarFile)> = None;
-        for j in jars.iter().rev() {
+        Self::open_first(&crate::install::jars_by_preference())
+    }
+
+    /// The first of `jars` that opens and has models this crate reads
+    fn open_first(jars: &[JarFile]) -> Result<Minecraft> {
+        for j in jars {
             if let Ok(a) = Assets::open(&j.path) {
                 if a.version().support() == Support::Full {
-                    best = Some((a, j));
-                    break;
+                    return Self::from_assets(a);
                 }
             }
         }
-        match best {
-            Some((a, _)) => Self::from_assets(a),
-            None => bail!(
-                "no readable Minecraft client jar found (looked for installs of the vanilla launcher, Prism Launcher, MultiMC, the Modrinth App, ATLauncher, GDLauncher and the CurseForge app, and MC_UNPACK_JAR)"
-            ),
-        }
+        bail!(
+            "no readable Minecraft client jar found (looked for installs of the vanilla launcher, Prism Launcher, MultiMC, the Modrinth App, ATLauncher, GDLauncher and the CurseForge app, and MC_UNPACK_JAR)"
+        )
     }
 
     /// Colours for tint indices; every model loaded afterwards is multiplied by them
@@ -932,6 +932,79 @@ mod tests {
         let e = mc.load_scene("world/W/4194304,0").unwrap_err().to_string();
         cleanup(&save);
         assert!(e.contains("outside the world"), "{e}");
+    }
+
+    #[test]
+    fn the_default_jar_is_the_one_the_environment_names_then_the_newest() {
+        use crate::install::{by_preference, explicit_jar, Source};
+        use crate::jar::testjar::JarBuilder;
+        use crate::world::region::tests::temp_dir;
+        let d = temp_dir("bridge-default");
+        let write = |rel: &str, files: &[(&str, &str)]| {
+            let mut b = JarBuilder::new();
+            for (name, text) in files {
+                b = b.add(name, text);
+            }
+            let path = d.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b.build_bytes()).unwrap();
+            path
+        };
+        let state = ("assets/minecraft/blockstates/x.json", r#"{"variants":{}}"#);
+        let installed = |version: &str, path: std::path::PathBuf| JarFile {
+            version: version.into(),
+            path,
+            source: Source::Prism,
+        };
+        let old = installed(
+            "1.20.1",
+            write(
+                "1.20.1/client.jar",
+                &[state, ("version.json", r#"{"id":"1.20.1"}"#)],
+            ),
+        );
+        let new = installed(
+            "1.21.1",
+            write(
+                "1.21.1/client.jar",
+                &[state, ("version.json", r#"{"id":"1.21.1"}"#)],
+            ),
+        );
+        // kept under a name that says nothing, and of a version older than both
+        let named = write(
+            "kept/client.jar",
+            &[state, ("version.json", r#"{"id":"1.19.2"}"#)],
+        );
+        // as `find_jars` gives them: sorted by version
+        let found = vec![explicit_jar(&named), old.clone(), new.clone()];
+        assert_eq!(found[0].version, "1.19.2");
+        let opened = |jars: Vec<JarFile>| {
+            Minecraft::open_first(&jars)
+                .unwrap()
+                .assets
+                .version()
+                .id
+                .clone()
+        };
+        // nothing named: the newest
+        assert_eq!(opened(by_preference(found.clone(), None)), "1.21.1");
+        // `MC_UNPACK_JAR` names one: that one, though a newer version is installed
+        assert_eq!(opened(by_preference(found.clone(), Some(&named))), "1.19.2");
+        // it names a jar this crate reads no models from: the newest that it does read
+        let textures = write(
+            "kept/textures.jar",
+            &[("assets/minecraft/textures/blocks/stone.png", "x")],
+        );
+        let mut with = vec![explicit_jar(&textures), old, new];
+        assert_eq!(
+            opened(by_preference(with.clone(), Some(&textures))),
+            "1.21.1"
+        );
+        // and with nothing readable at all, the error says where it looked
+        with.truncate(1);
+        let e = Minecraft::open_first(&with).err().unwrap().to_string();
+        assert!(e.contains("MC_UNPACK_JAR"), "{e}");
+        std::fs::remove_dir_all(&d).unwrap();
     }
 
     #[test]
