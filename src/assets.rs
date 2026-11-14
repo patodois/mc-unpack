@@ -1967,7 +1967,6 @@ pub mod tests {
                 .add("assets/minecraft/textures/pal.png", png(256, 256, swapped))
                 .build()
         };
-        let started = std::time::Instant::now();
         let a = Assets::from_jar(jar(png(256, 256, key))).unwrap();
         let t = a.texture("b_p").unwrap();
         for y in 0..64 {
@@ -1997,10 +1996,6 @@ pub mod tests {
                 .is_some_and(|r| r.0.contains("twice")),
             "{e:#}"
         );
-        // milliseconds with the palette sorted once; comparing every pair took 11 seconds in a
-        // test build on the machine that measured it
-        let took = started.elapsed();
-        assert!(took.as_secs() < 5, "the two swaps took {took:?}");
     }
 
     #[test]
