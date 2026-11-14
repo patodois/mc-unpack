@@ -171,26 +171,6 @@ pub struct StateTable<'a> {
 /// 100,000 for a whole region.
 pub const MAX_STATE_QUADS: usize = 2_000_000;
 
-/// A budget of the whole load is spent (block states, their quads). It refuses the load: any other
-/// error of a block or of a chunk loses only that block or chunk.
-#[derive(Debug)]
-pub struct OverBudget(pub String);
-
-impl std::fmt::Display for OverBudget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for OverBudget {}
-
-fn too_many_states() -> anyhow::Error {
-    OverBudget(format!(
-        "the world uses more than {MAX_STATES} distinct block states"
-    ))
-    .into()
-}
-
 fn air_like(local: &str) -> bool {
     matches!(local, "air" | "cave_air" | "void_air")
 }
@@ -317,7 +297,9 @@ impl<'a> StateTable<'a> {
                         return Ok(id);
                     }
                     if self.states.len() >= MAX_STATES {
-                        return Err(too_many_states());
+                        anyhow::bail!(
+                            "the world uses more than {MAX_STATES} distinct block states"
+                        );
                     }
                     let id = self.states.len() as u16;
                     self.states.push(StateEntry {
@@ -361,7 +343,7 @@ impl<'a> StateTable<'a> {
             return Ok(id);
         }
         if self.states.len() >= MAX_STATES {
-            return Err(too_many_states());
+            anyhow::bail!("the world uses more than {MAX_STATES} distinct block states");
         }
         let entry = self.prepare(
             name,
@@ -372,11 +354,10 @@ impl<'a> StateTable<'a> {
             waterlogged,
         );
         if self.state_quads + entry.quads.len() > self.max_state_quads {
-            return Err(OverBudget(format!(
+            anyhow::bail!(
                 "the block states of the world need more than {} quads",
                 self.max_state_quads
-            ))
-            .into());
+            );
         }
         self.state_quads += entry.quads.len();
         let id = self.states.len() as u16;

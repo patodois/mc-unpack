@@ -1152,7 +1152,7 @@ mod tests {
     }
 
     #[test]
-    fn a_load_over_a_budget_of_the_block_table_is_refused_not_cut_short() {
+    fn a_chunk_over_a_budget_of_the_block_table_fails_and_the_rest_still_loads() {
         // two chunks: the second needs a state and quads the first did not
         let mut first = ChunkSpec::new(0, 0);
         first.set(1, 64, 1, "minecraft:stone", &[]);
@@ -1163,12 +1163,23 @@ mod tests {
         let w = World::open(&save).unwrap();
         let o = BuildOptions::new(Window::region(0, 0));
         let (m, r) = build(&a, &w, &o).unwrap();
-        assert_eq!((m.quad_count(), r.load.failed_count), (12, 0));
-        // not a scene with one chunk missing and counted as damaged
+        assert_eq!((m.quad_count(), r.load.loaded), (12, 2));
+        assert_eq!(r.load.failed_count, 0);
+        // room for the quads of one of the two states: the load is not refused. The chunk that
+        // asks for the second state fails, with the budget as its reason, and the other is drawn
         let table = StateTable::new(&a).with_quad_budget(10);
-        let e = build_with(&a, &w, &o, table).unwrap_err().to_string();
-        assert!(e.contains("more than 10 quads"), "{e}");
+        let (m, r) = build_with(&a, &w, &o, table).unwrap();
         cleanup(&save);
+        assert_eq!((m.quad_count(), r.load.loaded), (6, 1));
+        assert_eq!(m.chunks.len(), 1);
+        assert_eq!((m.chunks[0].cx, m.chunks[0].cz), (0, 0));
+        assert_eq!(r.load.failed_count, 1);
+        let (cx, cz, why) = &r.load.failed[0];
+        assert_eq!((*cx, *cz), (1, 0));
+        assert!(why.contains("more than 10 quads"), "{why}");
+        // and the report says so
+        let text = r.lines().join("\n");
+        assert!(text.contains("more than 10 quads"), "{text}");
     }
 
     #[test]

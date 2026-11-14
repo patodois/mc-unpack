@@ -410,7 +410,7 @@ let (scene, report) = mc.load_world_report("world/New World/0,0?chunks=0,0,7,7")
 for line in report.lines() { println!("{line}"); }                // what was left out, and why
 ```
 
-**Memory and limits.** What a save can make this crate hold is capped, with the two exceptions the table names (the length of a biome name, and the texture images of the blocks, which are the jar's), and a window over a cap is refused with the number, never cut short. Three caps are checked just after what they count: the quad cap block by block, so a scene never holds more than the cap plus one block's quads (at most 1,040); the block-data cap chunk by chunk, so a load holds at most one chunk more (2 MiB: 256 sections); and the quads of the block states state by state (at most 1,040 more). Every other cap is checked before the memory it guards is taken:
+**Memory and limits.** What a save can make this crate hold is capped, with the two exceptions the table names (the length of a biome name, and the texture images of the blocks, which are the jar's), and a window over the caps on chunks, block data or scene quads is refused with the number, never cut short. The two budgets of the block table (distinct block states, and the quads they hold) do not refuse a load: the chunk that needs a state past the budget fails, the report counts it and gives that reason, and the rest of the window still loads. Three caps are checked just after what they count: the quad cap block by block, so a scene never holds more than the cap plus one block's quads (at most 1,040); the block-data cap chunk by chunk, so a load holds at most one chunk more (2 MiB: 256 sections); and the quads of the block states state by state (at most 1,040 more). Every other cap is checked before the memory it guards is taken:
 
 | What | Limit |
 |------|-------|
@@ -419,9 +419,9 @@ for line in report.lines() { println!("{line}"); }                // what was le
 | quads in the scene (about 100 bytes each; 150 in a glTF) | 3,000,000 (`--max-quads`) |
 | one chunk, uncompressed / an external `.mcc` | 24 MiB / 32 MiB |
 | tags in one NBT document, nesting | 2,000,000, 128 |
-| distinct block states (keyed by the properties the blockstate mentions, and `waterlogged`), biomes | 60,000, 4,096 |
+| distinct block states (keyed by the properties the blockstate mentions, and `waterlogged`), biomes | 60,000 (a chunk that needs one more is a failed chunk, with that reason; the rest loads), 4,096 (a biome past that is read as unknown) |
 | a biome name | **not capped**: an NBT string, 65,535 bytes at most. A load keeps up to 4,096 distinct names (three copies of each: about 800 MiB if a save were made of the longest), and the report lists the ones the jar has no data for |
-| quads held by all the block states together (about 110 bytes each) | 2,000,000 |
+| quads held by all the block states together (about 110 bytes each) | 2,000,000 (a chunk whose state would pass it is a failed chunk, with that reason; the rest loads) |
 | a palette entry: name, a property, properties | 256, 128 bytes, 64 |
 | a chunk's `Status` | 256 bytes (the game's are the names of its generation steps, 30 bytes at most); a chunk with a longer one is a failed chunk, with that reason |
 | bytes of texture images held: the first frame of each texture the blocks use, and a copy per biome colour it is drawn in | **not capped**: a frame is as big as the jar's PNG, 16 MiB at most (2048 x 2048), one is kept per distinct texture the window's blocks use, and a tinted texture once more per biome colour (4,096 biomes at most). Every decoded texture of a real jar is a few MiB; a jar of high-resolution textures needs what its textures need |
@@ -499,7 +499,7 @@ materials; options are the checker's, `--help` lists them; put `--mc-version` be
 **no errors and no warnings** (exit status 0); the same assets in bridge-testbed give a 1.000 x 1.000 x 1.000 m box for
 `block/stone`, identical to the Hytale block it is compared with (AABB `[-0.5, 0, -0.5]` to `[0.5, 1, 0.5]`).
 
-Tests: `cargo test` runs 261 unit tests (242 without the `bridge` feature) on tiny synthetic jars and saves built in the tests (no game data anywhere; they include a zip
+Tests: `cargo test` runs 259 unit tests (240 without the `bridge` feature) on tiny synthetic jars and saves built in the tests (no game data anywhere; they include a zip
 that lies about its size, PNGs over the limits, NBT with lengths past the file, region tables that point anywhere, and regions
 written chunk by chunk in the 1.13 and in the current layout). It reads no install and no save, and writes only to the
 target folder and to the system temp folder (the synthetic jars and saves).
