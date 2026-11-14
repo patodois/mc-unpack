@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 
 use super::biomes::BiomeTable;
-use super::blocks::{dir_index, Fate, OverBudget, StateTable, AIR};
+use super::blocks::{dir_index, Fate, StateTable, AIR};
 use super::grid::{self, BlockGrid, LoadLimits, LoadStats, Sec};
 use super::level::LevelInfo;
 use super::save::World;
@@ -557,7 +557,6 @@ fn build_with(
         grid: &grid,
         bank: Vec::new(),
         bank_index: HashMap::new(),
-        tinted_bytes: 0,
         counts: vec![0; table.states.len()],
         tinted_blocks: 0,
         untinted_by_name: BTreeMap::new(),
@@ -689,8 +688,6 @@ struct Mesher<'a> {
     grid: &'a BlockGrid,
     bank: Vec<WorldMaterial>,
     bank_index: HashMap<MatKey, u32>,
-    /// Bytes of the tinted copies in `bank` (an untinted material shares the table's image)
-    tinted_bytes: usize,
     counts: Vec<u64>,
     tinted_blocks: u64,
     untinted_by_name: BTreeMap<String, u64>,
@@ -702,26 +699,18 @@ struct Mesher<'a> {
 }
 
 impl Mesher<'_> {
-    fn material(&mut self, tex: u32, translucent: bool, tint: Option<[u8; 3]>) -> Result<u32> {
+    fn material(&mut self, tex: u32, translucent: bool, tint: Option<[u8; 3]>) -> u32 {
         let key = MatKey {
             tex,
             translucent,
             tint,
         };
         if let Some(&i) = self.bank_index.get(&key) {
-            return Ok(i);
+            return i;
         }
         let t = &self.table.textures[tex as usize];
         let image = match tint {
-            Some(c) => {
-                // a copy of the frame per colour: counted with the table's images, before it is made
-                let (held, budget) = self.table.image_bytes();
-                if held + self.tinted_bytes + t.image.data.len() > budget {
-                    return Err(OverBudget::images(budget));
-                }
-                self.tinted_bytes += t.image.data.len();
-                Arc::new(t.image.tinted(c))
-            }
+            Some(c) => Arc::new(t.image.tinted(c)),
             None => t.image.clone(),
         };
         let alpha = t.image.alpha_class(translucent);
@@ -733,7 +722,7 @@ impl Mesher<'_> {
         });
         let i = (self.bank.len() - 1) as u32;
         self.bank_index.insert(key, i);
-        Ok(i)
+        i
     }
 
     fn chunk(&mut self, cx: i32, cz: i32) -> Result<ChunkMesh> {
@@ -849,7 +838,7 @@ impl Mesher<'_> {
                                 });
                                 colour = t;
                             }
-                            let mat = self.material(q.tex, q.translucent, colour)?;
+                            let mat = self.material(q.tex, q.translucent, colour);
                             let gi = *group_of.entry(mat).or_insert_with(|| {
                                 groups.push(Group {
                                     material: mat,
@@ -1164,7 +1153,7 @@ mod tests {
 
     #[test]
     fn a_load_over_a_budget_of_the_block_table_is_refused_not_cut_short() {
-        // two chunks: the second needs a state, quads and a texture the first did not
+        // two chunks: the second needs a state and quads the first did not
         let mut first = ChunkSpec::new(0, 0);
         first.set(1, 64, 1, "minecraft:stone", &[]);
         let mut second = ChunkSpec::new(1, 0);
@@ -1175,54 +1164,10 @@ mod tests {
         let o = BuildOptions::new(Window::region(0, 0));
         let (m, r) = build(&a, &w, &o).unwrap();
         assert_eq!((m.quad_count(), r.load.failed_count), (12, 0));
-        for (table, what) in [
-            (
-                StateTable::new(&a).with_quad_budget(10),
-                "more than 10 quads",
-            ),
-            (
-                StateTable::new(&a).with_image_budget(2_000),
-                "more than 2000 bytes of images",
-            ),
-        ] {
-            // not a scene with one chunk missing and counted as damaged
-            let e = build_with(&a, &w, &o, table).unwrap_err().to_string();
-            assert!(e.contains(what), "{e}");
-        }
-        cleanup(&save);
-    }
-
-    #[test]
-    fn tinted_copies_count_against_the_image_budget_of_the_load() {
-        // grass in two biomes: the texture once in the table, and one copy per colour in the scene
-        let mut c = ChunkSpec::new(0, 0);
-        c.set(1, 64, 1, "minecraft:grass_block", &[("snowy", "false")]);
-        c.set(4, 64, 1, "minecraft:grass_block", &[("snowy", "false")]);
-        c.biome_cells.insert((4, 1), "minecraft:desert".into());
-        let save = write_world("mesher-images", "9.9", 9000, &[c], false);
-        let a = world_jar();
-        let w = World::open(&save).unwrap();
-        let o = BuildOptions::new(Window::region(0, 0));
-        let (m, _) = build(&a, &w, &o).unwrap();
-        let tinted = m.materials.iter().filter(|x| x.tint.is_some()).count();
-        assert_eq!(tinted, 2, "{:?}", m.materials);
-        let mut table = StateTable::new(&a);
-        table
-            .resolve("minecraft:grass_block", &[("snowy".into(), "false".into())])
-            .unwrap();
-        let held = table.image_bytes().0;
-        let frame = m.materials[0].image.data.len();
-        assert_eq!(frame, 1_024);
-        // the table's images and two copies fit exactly; one byte less and the load is refused
-        let need = held + tinted * frame;
-        let with =
-            |budget: usize| build_with(&a, &w, &o, StateTable::new(&a).with_image_budget(budget));
-        assert_eq!(with(need).unwrap().0.materials.len(), m.materials.len());
-        let e = with(need - 1).unwrap_err().to_string();
-        assert!(
-            e.contains(&format!("more than {} bytes of images", need - 1)),
-            "{e}"
-        );
+        // not a scene with one chunk missing and counted as damaged
+        let table = StateTable::new(&a).with_quad_budget(10);
+        let e = build_with(&a, &w, &o, table).unwrap_err().to_string();
+        assert!(e.contains("more than 10 quads"), "{e}");
         cleanup(&save);
     }
 

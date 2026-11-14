@@ -163,9 +163,6 @@ pub struct StateTable<'a> {
     /// model's quads, and a hostile palette could ask for many)
     state_quads: usize,
     max_state_quads: usize,
-    /// Bytes of the images in `textures`, and the most the load may hold ([`MAX_SCENE_IMAGE_BYTES`])
-    image_bytes: usize,
-    max_image_bytes: usize,
     /// Per block name: why a bare palette name cannot be drawn (`None`: it can)
     bare: HashMap<String, Option<String>>,
 }
@@ -174,15 +171,8 @@ pub struct StateTable<'a> {
 /// 100,000 for a whole region.
 pub const MAX_STATE_QUADS: usize = 2_000_000;
 
-/// Bytes of texture images (RGBA) one load may hold: the first frame of every texture its block
-/// states use, and in the scene one more copy of a frame for each biome colour it is drawn in.
-/// Every decoded texture of a whole jar is a few MiB in the eight jars measured (the README's
-/// limits table), and their block textures are 16 x 16 a frame, 1 KiB: this is room for 250,000
-/// tinted copies, where the biome table stops at 4,096 biomes.
-pub const MAX_SCENE_IMAGE_BYTES: usize = 256 << 20;
-
-/// A budget of the whole load is spent (block states, their quads, texture images). It refuses the
-/// load: any other error of a block or of a chunk loses only that block or chunk.
+/// A budget of the whole load is spent (block states, their quads). It refuses the load: any other
+/// error of a block or of a chunk loses only that block or chunk.
 #[derive(Debug)]
 pub struct OverBudget(pub String);
 
@@ -193,20 +183,6 @@ impl std::fmt::Display for OverBudget {
 }
 
 impl std::error::Error for OverBudget {}
-
-impl OverBudget {
-    pub(crate) fn images(budget: usize) -> anyhow::Error {
-        let size = if budget >= 1 << 20 {
-            format!("{} MiB", budget >> 20)
-        } else {
-            format!("{budget} bytes")
-        };
-        OverBudget(format!(
-            "the textures of the blocks in the window need more than {size} of images; use a smaller window, or a jar whose textures are the game's size"
-        ))
-        .into()
-    }
-}
 
 fn too_many_states() -> anyhow::Error {
     OverBudget(format!(
@@ -241,8 +217,6 @@ impl<'a> StateTable<'a> {
             known,
             state_quads: 0,
             max_state_quads: MAX_STATE_QUADS,
-            image_bytes: 0,
-            max_image_bytes: MAX_SCENE_IMAGE_BYTES,
             bare: HashMap::new(),
         }
     }
@@ -251,17 +225,6 @@ impl<'a> StateTable<'a> {
     pub fn with_quad_budget(mut self, n: usize) -> Self {
         self.max_state_quads = n;
         self
-    }
-
-    /// A different budget of image bytes for the load (the default is [`MAX_SCENE_IMAGE_BYTES`])
-    pub fn with_image_budget(mut self, bytes: usize) -> Self {
-        self.max_image_bytes = bytes;
-        self
-    }
-
-    /// Bytes of texture images held so far, and the budget they and the scene's tinted copies share
-    pub fn image_bytes(&self) -> (usize, usize) {
-        (self.image_bytes, self.max_image_bytes)
     }
 
     pub fn assets(&self) -> &Assets {
@@ -407,7 +370,7 @@ impl<'a> StateTable<'a> {
             &kept,
             ignored,
             waterlogged,
-        )?;
+        );
         if self.state_quads + entry.quads.len() > self.max_state_quads {
             return Err(OverBudget(format!(
                 "the block states of the world need more than {} quads",
@@ -427,12 +390,6 @@ impl<'a> StateTable<'a> {
             return Ok(i);
         }
         let t = self.assets.texture(path)?;
-        // checked before the frame is copied out of the sheet
-        let bytes = t.frame_width as usize * t.frame_height as usize * 4;
-        if self.image_bytes + bytes > self.max_image_bytes {
-            return Err(OverBudget::images(self.max_image_bytes));
-        }
-        self.image_bytes += bytes;
         let image = t.default_frame();
         let alpha = image.alpha_class(false);
         self.textures.push(TexInfo {
@@ -453,7 +410,7 @@ impl<'a> StateTable<'a> {
         kept: &[(String, String)],
         ignored: Vec<String>,
         waterlogged: bool,
-    ) -> Result<StateEntry> {
+    ) -> StateEntry {
         let mut e = StateEntry {
             name: Arc::from(name),
             props: kept
@@ -473,21 +430,21 @@ impl<'a> StateTable<'a> {
             e.fate = Fate::Unknown(format!(
                 "namespace of {name}: only `minecraft` blocks are in the client jar"
             ));
-            return Ok(e);
+            return e;
         }
         if !in_jar {
             e.fate = Fate::Unknown(format!(
                 "no blockstate `{local}` in the jar of Minecraft {}",
                 self.assets.version().id
             ));
-            return Ok(e);
+            return e;
         }
         let state = State(kept.iter().cloned().collect());
         let baked = match self.assets.bake_block(local, &state) {
             Ok(b) => b,
             Err(err) => {
                 e.fate = Fate::LeftOut(format!("could not be baked: {err:#}"));
-                return Ok(e);
+                return e;
             }
         };
         if baked.is_empty() {
@@ -498,7 +455,7 @@ impl<'a> StateTable<'a> {
                 }
                 _ => why.to_string(),
             });
-            return Ok(e);
+            return e;
         }
         e.notes = baked.report.notes.clone();
         if !ignored.is_empty() {
@@ -511,13 +468,11 @@ impl<'a> StateTable<'a> {
         for q in baked.quads() {
             let tex = match self.texture(&q.texture) {
                 Ok(t) => t,
-                // the budget of the whole load: the load is refused, the block is not left out
-                Err(err) if err.is::<OverBudget>() => return Err(err),
                 Err(err) => {
                     e.fate =
                         Fate::LeftOut(format!("texture {} could not be read: {err:#}", q.texture));
                     e.quads.clear();
-                    return Ok(e);
+                    return e;
                 }
             };
             e.quads.push(PreQuad {
@@ -534,7 +489,7 @@ impl<'a> StateTable<'a> {
             e.tint = rule;
         }
         e.covers = self.compute_covers(&e.quads);
-        Ok(e)
+        e
     }
 
     fn compute_covers(&self, quads: &[PreQuad]) -> [bool; 6] {
@@ -753,38 +708,6 @@ mod tests {
         let mut t = StateTable::new(&a).with_quad_budget(100);
         let e = t.resolve("minecraft:many", &[]).unwrap_err().to_string();
         assert!(e.contains("more than 100 quads"), "{e}");
-    }
-
-    #[test]
-    fn the_textures_of_one_load_share_a_budget_of_image_bytes() {
-        let a = crate::world::testworld::world_jar();
-        // a 16 x 16 frame is 1,024 bytes: room for one texture and not for two
-        let mut t = StateTable::new(&a).with_image_budget(2_000);
-        let stone = t.resolve("minecraft:stone", &[]).unwrap();
-        assert_eq!(t.image_bytes(), (1_024, 2_000));
-        // a state of the same texture costs nothing more
-        let wet = [("waterlogged".to_string(), "true".to_string())];
-        assert_ne!(t.resolve("minecraft:stone", &wet).unwrap(), stone);
-        assert_eq!(t.image_bytes().0, 1_024);
-        // the second texture is over: the load is refused with the number, the block is not
-        // quietly left out, and nothing was kept for it
-        let e = t.resolve("minecraft:glass", &[]).unwrap_err();
-        assert!(e.is::<OverBudget>());
-        let e = e.to_string();
-        assert!(e.contains("more than 2000 bytes of images"), "{e}");
-        assert_eq!((t.states.len(), t.textures.len()), (3, 1));
-        assert_eq!(t.image_bytes().0, 1_024);
-        // exactly at the budget is within it, and the default is far from two textures
-        let mut t = StateTable::new(&a).with_image_budget(2_048);
-        t.resolve("minecraft:stone", &[]).unwrap();
-        t.resolve("minecraft:glass", &[]).unwrap();
-        assert_eq!(t.image_bytes().0, 2_048);
-        let mut t = StateTable::new(&a);
-        t.resolve("minecraft:stone", &[]).unwrap();
-        t.resolve("minecraft:glass", &[]).unwrap();
-        assert_eq!(t.image_bytes(), (2_048, MAX_SCENE_IMAGE_BYTES));
-        let e = OverBudget::images(MAX_SCENE_IMAGE_BYTES).to_string();
-        assert!(e.contains("more than 256 MiB of images"), "{e}");
     }
 
     #[test]
