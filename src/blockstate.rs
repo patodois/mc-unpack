@@ -49,11 +49,16 @@ pub struct Part {
     pub apply: Choice,
 }
 
+/// A parsed blockstate file. [`BlockState::parse`] is what makes one: the two lists are for reading.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BlockState {
     /// In file order
     pub variants: Vec<(String, Choice)>,
     pub multipart: Vec<Part>,
+    /// The property names the file mentions, sorted: [`BlockState::properties`], worked out once
+    /// when the file is parsed. A world asks [`BlockState::split_known`] for every palette entry
+    /// of every section, and a stair's file has 80 keys to read each time.
+    known: Vec<String>,
 }
 
 /// `property=value` pairs
@@ -64,6 +69,8 @@ impl State {
     /// Parses `a=b,c=d`. An empty string, `normal` and `inventory` are the empty state: they are
     /// how old and new files write "no properties".
     pub fn parse(s: &str) -> Result<State> {
+        #[cfg(test)]
+        tests::STATE_PARSES.with(|n| n.set(n.get() + 1));
         let s = s.trim();
         let mut m = BTreeMap::new();
         if s.is_empty() || s == "normal" || s == "inventory" {
@@ -167,10 +174,13 @@ impl BlockState {
         if variants.is_empty() && multipart.is_empty() {
             bail!("neither `variants` nor `multipart`");
         }
-        Ok(BlockState {
+        let mut b = BlockState {
             variants,
             multipart,
-        })
+            known: Vec::new(),
+        };
+        b.known = b.properties();
+        Ok(b)
     }
 
     pub fn is_multipart(&self) -> bool {
@@ -191,7 +201,7 @@ impl BlockState {
             .chain(self.multipart.iter().flat_map(|p| p.apply.iter()))
     }
 
-    /// The property names a file mentions
+    /// The property names a file mentions, sorted
     pub fn properties(&self) -> Vec<String> {
         let mut set = std::collections::BTreeSet::new();
         for (k, _) in &self.variants {
@@ -280,11 +290,10 @@ impl BlockState {
 
     /// Splits `state` into the properties this file mentions and the ones it does not
     pub fn split_known(&self, state: &State) -> (State, Vec<String>) {
-        let known = self.properties();
         let mut keep = BTreeMap::new();
         let mut ignored = Vec::new();
         for (k, v) in &state.0 {
-            if known.contains(k) {
+            if self.known.binary_search(k).is_ok() {
                 keep.insert(k.clone(), v.clone());
             } else {
                 ignored.push(k.clone());
@@ -523,6 +532,114 @@ mod tests {
         "facing=east,half=bottom":{"model":"minecraft:block/s"},
         "facing=west,half=bottom":{"model":"minecraft:block/s","y":180,"uvlock":true},
         "facing=east,half=top":{"model":"minecraft:block/s","x":180}}}"#;
+
+    thread_local! {
+        /// How many times this thread has parsed a state string
+        pub(super) static STATE_PARSES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    /// `split_known` as it was written first: the property list worked out from the file on every
+    /// call, and looked through from the start
+    fn split_known_the_long_way(b: &BlockState, state: &State) -> (State, Vec<String>) {
+        let known = b.properties();
+        let mut keep = BTreeMap::new();
+        let mut ignored = Vec::new();
+        for (k, v) in &state.0 {
+            if known.contains(k) {
+                keep.insert(k.clone(), v.clone());
+            } else {
+                ignored.push(k.clone());
+            }
+        }
+        (State(keep), ignored)
+    }
+
+    /// The 80 states of a stair, as the game's files write them
+    fn stairs_80() -> String {
+        let mut keys = Vec::new();
+        for facing in ["east", "north", "south", "west"] {
+            for half in ["bottom", "top"] {
+                for shape in [
+                    "inner_left",
+                    "inner_right",
+                    "outer_left",
+                    "outer_right",
+                    "straight",
+                ] {
+                    for waterlogged in ["false", "true"] {
+                        keys.push(format!(
+                            r#""facing={facing},half={half},shape={shape},waterlogged={waterlogged}":{{"model":"block/s"}}"#
+                        ));
+                    }
+                }
+            }
+        }
+        format!(r#"{{"variants":{{{}}}}}"#, keys.join(","))
+    }
+
+    #[test]
+    fn split_known_gives_what_it_gave_and_parses_no_key_again() {
+        let files = [
+            stairs_80(),
+            STAIRS.to_string(),
+            // no property at all, the old spellings of that, and a key that is not a state
+            r#"{"variants":{"":{"model":"a"}}}"#.to_string(),
+            r#"{"variants":{"normal":{"model":"a"},"inventory":{"model":"a"}}}"#.to_string(),
+            r#"{"variants":{"axis=y":{"model":"a"},"not a state":{"model":"a"},"b=":{"model":"a"}}}"#.to_string(),
+            // conditions, nested, with alternatives and a negation
+            r#"{"multipart":[{"apply":{"model":"post"}},
+                {"when":{"north":"true|tall","up":"!false"},"apply":{"model":"arm"}},
+                {"when":{"OR":[{"east":"side"},{"AND":[{"west":"up"},{"power":"1|2"}]}]},"apply":{"model":"arm"}}]}"#
+                .to_string(),
+            // both forms in one file
+            r#"{"variants":{"lit=true":{"model":"a"}},"multipart":[{"when":{"age":"3"},"apply":{"model":"b"}}]}"#.to_string(),
+        ];
+        let states = [
+            "",
+            "facing=east",
+            "facing=east,half=top,shape=straight,waterlogged=true",
+            "waterlogged=true,power=3,junk=x",
+            "junk=x,more=y",
+            "north=true,east=side,west=up,up=false,age=3,lit=true,axis=y,b=c",
+            "Facing=east,facing =east,half=TOP",
+        ];
+        for file in &files {
+            let b = BlockState::parse(file).unwrap();
+            for text in states {
+                let state = State::parse(text).unwrap();
+                assert_eq!(
+                    b.split_known(&state),
+                    split_known_the_long_way(&b, &state),
+                    "{text:?} in {file}"
+                );
+            }
+            // a property name that sorts before, between and after the file's own
+            for name in ["", "a", "facing", "facinh", "half ", "zzz", "\u{0}"] {
+                let state = State(BTreeMap::from([(name.to_string(), "v".to_string())]));
+                assert_eq!(
+                    b.split_known(&state),
+                    split_known_the_long_way(&b, &state),
+                    "{name:?} in {file}"
+                );
+            }
+        }
+        // a world asks once per palette entry of every section: the file's keys are not read again
+        let b = BlockState::parse(stairs_80()).unwrap();
+        let state = State::parse("facing=east,half=top,shape=straight,waterlogged=true").unwrap();
+        let before = STATE_PARSES.with(|n| n.get());
+        let started = std::time::Instant::now();
+        let rounds = 20_000;
+        for _ in 0..rounds {
+            let (kept, ignored) = b.split_known(&state);
+            assert!(kept.0.len() == 4 && ignored.is_empty());
+        }
+        let parses = STATE_PARSES.with(|n| n.get()) - before;
+        eprintln!(
+            "{rounds} split_known calls on 80 keys: {:?}, {parses} keys parsed",
+            started.elapsed()
+        );
+        assert_eq!(parses, 0, "{parses} keys parsed again in {rounds} calls");
+    }
 
     #[test]
     fn variants_pick_by_state() {
