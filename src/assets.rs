@@ -237,7 +237,7 @@ pub struct Assets {
     resolved: Mutex<HashMap<String, Arc<ResolvedModel>>>,
     textures: Mutex<TextureCache>,
     colormaps: Mutex<HashMap<ColormapKind, Arc<Colormap>>>,
-    permutations: OnceLock<HashMap<String, PermSource>>,
+    permutations: OnceLock<Vec<PermAtlas>>,
     /// What the three parsed-file caches are accounted at (see [`MAX_PARSED_CACHE_BYTES`])
     parsed_bytes: AtomicUsize,
 }
@@ -250,6 +250,54 @@ struct PermSource {
     base: String,
     palette_key: String,
     palette: String,
+}
+
+/// One `paletted_permutations` source of an atlas file, as the file has it: every texture of
+/// `textures` gets one generated texture per permutation, named `<texture><separator><permutation>`.
+/// The names are worked out when one is asked for and never listed: a file of 128 KiB can name
+/// tens of millions of them.
+#[derive(Debug)]
+struct PermAtlas {
+    /// In file order, without the `minecraft:` namespace
+    textures: Vec<String>,
+    palette_key: String,
+    separator: String,
+    /// Permutation name and its palette, in file order
+    permutations: Vec<(String, String)>,
+}
+
+impl PermAtlas {
+    /// The source of the generated texture `path`, if this atlas source makes one of that name.
+    /// The work is one pass over the two lists (no name is built, nothing is hashed but lengths).
+    fn find(&self, path: &str) -> Option<PermSource> {
+        // the length of the permutation name each fitting texture leaves, with the last such
+        // texture of the list: where a name can be cut in two ways, the texture listed last makes it
+        let mut wanted: HashMap<usize, usize> = HashMap::new();
+        for (i, t) in self.textures.iter().enumerate() {
+            if let Some(name) = path
+                .strip_prefix(t.as_str())
+                .and_then(|rest| rest.strip_prefix(self.separator.as_str()))
+            {
+                wanted.insert(name.len(), i);
+            }
+        }
+        if wanted.is_empty() {
+            return None;
+        }
+        let mut best: Option<(usize, &str)> = None;
+        for (name, palette) in &self.permutations {
+            if let Some(&i) = wanted.get(&name.len()) {
+                if path.ends_with(name.as_str()) && best.is_none_or(|(b, _)| i > b) {
+                    best = Some((i, palette));
+                }
+            }
+        }
+        best.map(|(i, palette)| PermSource {
+            base: self.textures[i].clone(),
+            palette_key: self.palette_key.clone(),
+            palette: palette.to_string(),
+        })
+    }
 }
 
 impl Assets {
@@ -450,9 +498,9 @@ impl Assets {
         }
         let entry = format!("{ROOT}/textures/{path}.png");
         if !self.jar.contains(&entry) {
-            if let Some(src) = self.permutations().get(&path) {
+            if let Some(src) = self.permutation(&path) {
                 let t = Arc::new(
-                    self.permute(src)
+                    self.permute(&src)
                         .with_context(|| format!("generating {path}"))?,
                 );
                 self.cache_texture(path, &t);
@@ -485,9 +533,12 @@ impl Assets {
         c.map.insert(path, t.clone());
     }
 
-    fn permutations(&self) -> &HashMap<String, PermSource> {
+    /// The `paletted_permutations` sources of the jar's atlas files, in the order of the files and
+    /// of the sources in them
+    fn permutation_atlases(&self) -> &[PermAtlas] {
         self.permutations.get_or_init(|| {
-            let mut out = HashMap::new();
+            let strip = |s: &str| s.strip_prefix("minecraft:").unwrap_or(s).to_string();
+            let mut out = Vec::new();
             let prefix = format!("{ROOT}/atlases/");
             for n in self
                 .jar
@@ -516,31 +567,37 @@ impl Assets {
                         continue;
                     };
                     let sep = s.get("separator").and_then(|x| x.as_str()).unwrap_or("_");
-                    for t in texs.iter().filter_map(|t| t.as_str()) {
-                        for (name, palette) in perms {
-                            let Some(pal) = palette.as_str() else {
-                                continue;
-                            };
-                            out.insert(
-                                format!("{}{sep}{name}", t.strip_prefix("minecraft:").unwrap_or(t)),
-                                PermSource {
-                                    base: t.strip_prefix("minecraft:").unwrap_or(t).to_string(),
-                                    palette_key: key
-                                        .strip_prefix("minecraft:")
-                                        .unwrap_or(key)
-                                        .to_string(),
-                                    palette: pal
-                                        .strip_prefix("minecraft:")
-                                        .unwrap_or(pal)
-                                        .to_string(),
-                                },
-                            );
-                        }
-                    }
+                    out.push(PermAtlas {
+                        textures: texs.iter().filter_map(|t| t.as_str()).map(strip).collect(),
+                        palette_key: strip(key),
+                        separator: sep.to_string(),
+                        permutations: perms
+                            .iter()
+                            .filter_map(|(name, pal)| Some((name.clone(), strip(pal.as_str()?))))
+                            .collect(),
+                    });
                 }
             }
             out
         })
+    }
+
+    /// What generates the texture `path` (relative to `textures/`), when an atlas file says one is
+    /// generated under that name. Where two sources make the same name, the later one counts.
+    fn permutation(&self, path: &str) -> Option<PermSource> {
+        self.permutation_atlases()
+            .iter()
+            .rev()
+            .find_map(|a| a.find(path))
+    }
+
+    /// How many texture and permutation names are kept from the atlas files
+    #[cfg(test)]
+    fn permutation_entries(&self) -> usize {
+        self.permutation_atlases()
+            .iter()
+            .map(|a| a.textures.len() + a.permutations.len())
+            .sum()
     }
 
     /// Builds a `paletted_permutations` texture. The game's rules for the awkward cases (a colour
@@ -575,29 +632,30 @@ impl Assets {
             ))
             .into());
         }
-        // palette key colour -> replacement colour, by position in the two palettes
-        let map: Vec<([u8; 3], [u8; 3])> = (0..n)
+        // palette key colour -> replacement colour, by position in the two palettes; sorted by the
+        // key colour, so that a colour is found (and a colour listed twice noticed) without
+        // comparing it with every other
+        let rgb = |c: &[u8]| u32::from_be_bytes([0, c[0], c[1], c[2]]);
+        let mut map: Vec<(u32, [u8; 3])> = (0..n)
             .map(|i| {
-                let k = &key.data[i * 4..i * 4 + 3];
                 let p = &pal.data[i * 4..i * 4 + 3];
-                ([k[0], k[1], k[2]], [p[0], p[1], p[2]])
+                (rgb(&key.data[i * 4..i * 4 + 3]), [p[0], p[1], p[2]])
             })
             .collect();
-        for (i, (k, _)) in map.iter().enumerate() {
-            if map[..i].iter().any(|(k2, _)| k2 == k) {
-                return Err(Refused(format!(
-                    "the key palette {} has a colour twice; which replacement the game picks is not in the data",
-                    src.palette_key
-                ))
-                .into());
-            }
+        map.sort_unstable_by_key(|&(k, _)| k);
+        if map.windows(2).any(|w| w[0].0 == w[1].0) {
+            return Err(Refused(format!(
+                "the key palette {} has a colour twice; which replacement the game picks is not in the data",
+                src.palette_key
+            ))
+            .into());
         }
         for px in img.data.chunks_exact_mut(4) {
             if px[3] == 0 {
                 continue;
             }
-            if let Some((_, to)) = map.iter().find(|(k, _)| k[..] == px[..3]) {
-                px[..3].copy_from_slice(to);
+            if let Ok(i) = map.binary_search_by_key(&rgb(&px[..3]), |&(k, _)| k) {
+                px[..3].copy_from_slice(&map[i].1);
             }
         }
         Texture::new(img, None)
@@ -607,7 +665,7 @@ impl Assets {
         normalize_location(path)
             .map(|p| {
                 self.jar.contains(&format!("{ROOT}/textures/{p}.png"))
-                    || self.permutations().contains_key(&p)
+                    || self.permutation(&p).is_some()
             })
             .unwrap_or(false)
     }
@@ -1754,6 +1812,195 @@ pub mod tests {
             .unwrap_err()
             .downcast_ref::<Refused>()
             .is_some());
+    }
+
+    /// The table of generated textures as it was once built: every texture of every source
+    /// joined with every permutation, a later entry replacing an earlier one of the same name
+    fn expanded(atlases: &[&str]) -> HashMap<String, PermSource> {
+        let strip = |s: &str| s.strip_prefix("minecraft:").unwrap_or(s).to_string();
+        let mut out = HashMap::new();
+        for text in atlases {
+            let v: Value = serde_json::from_str(text).unwrap();
+            for s in v["sources"].as_array().unwrap() {
+                let ty = s["type"].as_str().unwrap_or("");
+                if ty.strip_prefix("minecraft:").unwrap_or(ty) != "paletted_permutations" {
+                    continue;
+                }
+                let (Some(key), Some(perms), Some(texs)) = (
+                    s["palette_key"].as_str(),
+                    s["permutations"].as_object(),
+                    s["textures"].as_array(),
+                ) else {
+                    continue;
+                };
+                let sep = s["separator"].as_str().unwrap_or("_");
+                for t in texs.iter().filter_map(|t| t.as_str()) {
+                    for (name, palette) in perms {
+                        let Some(pal) = palette.as_str() else {
+                            continue;
+                        };
+                        out.insert(
+                            format!("{}{sep}{name}", strip(t)),
+                            PermSource {
+                                base: strip(t),
+                                palette_key: strip(key),
+                                palette: strip(pal),
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn generated_texture_names_resolve_as_the_full_table_did() {
+        // names that split in two ways, a texture listed twice, the same name from two sources and
+        // from two files, an empty and a long separator, a permutation that is not a palette, a
+        // namespace on everything, sources of other types and sources missing a field
+        let a_json = r#"{"sources":[
+            {"type":"single","resource":"x"},
+            {"type":"paletted_permutations","textures":["a","a_b","minecraft:t/c",7,"a"],"palette_key":"minecraft:k1",
+             "permutations":{"b_c":"p1","c":"minecraft:p2","d":"p3","skip":5}},
+            {"type":"minecraft:paletted_permutations","textures":["a_b","t/c"],"palette_key":"k2",
+             "permutations":{"c":"p4","d":3,"e":"p5"}},
+            {"type":"paletted_permutations","textures":["ab","a"],"palette_key":"k3","separator":"",
+             "permutations":{"c":"p6","bc":"p7","_b_c":"p8"}},
+            {"type":"paletted_permutations","textures":["x","x--"],"palette_key":"k4","separator":"--",
+             "permutations":{"y":"p9","--y":"p10"}},
+            {"type":"paletted_permutations","textures":["no_key"],"permutations":{"c":"p11"}},
+            {"type":"paletted_permutations","textures":["é","éé"],"palette_key":"k5","separator":"é",
+             "permutations":{"é":"p12","éé":"p13"}}
+        ]}"#;
+        let b_json = r#"{"sources":[
+            {"type":"paletted_permutations","textures":["a_b","z"],"palette_key":"k6",
+             "permutations":{"d":"p14","c":7,"q":"p15"}}
+        ]}"#;
+        let a = Assets::from_jar(
+            JarBuilder::new()
+                .add("assets/minecraft/blockstates/x.json", r#"{"variants":{}}"#)
+                .add("assets/minecraft/atlases/a.json", a_json)
+                .add("assets/minecraft/atlases/b.json", b_json)
+                .add("assets/minecraft/atlases/broken.json", "{")
+                .add("assets/minecraft/atlases/notes.txt", "x")
+                .build(),
+        )
+        .unwrap();
+        let want = expanded(&[a_json, b_json]);
+        assert!(want.len() > 20, "{}", want.len());
+        for (name, source) in &want {
+            assert_eq!(a.permutation(name).as_ref(), Some(source), "{name}");
+            assert!(a.has_texture(name), "{name}");
+        }
+        // every name near a real one that the table does not have
+        let mut near: Vec<String> = vec!["".into(), "a".into(), "_".into(), "no_key_c".into()];
+        for name in want.keys() {
+            near.push(format!("{name}x"));
+            near.push(format!("x{name}"));
+            near.push(name.replace('_', "-"));
+            near.extend(name.char_indices().map(|(i, _)| name[..i].to_string()));
+        }
+        for name in near.iter().filter(|n| !want.contains_key(*n)) {
+            assert_eq!(a.permutation(name), None, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn an_atlas_is_not_expanded_into_every_texture_times_every_permutation() {
+        // 1,000 textures and 1,000 permutations in 30 KB of JSON: a million generated names
+        let (n, mut textures, mut perms) = (1_000, Vec::new(), Vec::new());
+        for i in 0..n {
+            textures.push(format!("\"t{i}\""));
+            perms.push(format!("\"p{i}\":\"pal/{i}\""));
+        }
+        let atlas = format!(
+            r#"{{"sources":[{{"type":"paletted_permutations","textures":[{}],"palette_key":"key","permutations":{{{}}}}}]}}"#,
+            textures.join(","),
+            perms.join(",")
+        );
+        assert!(atlas.len() < crate::jar::MAX_JSON as usize);
+        let a = Assets::from_jar(
+            JarBuilder::new()
+                .add("assets/minecraft/blockstates/x.json", r#"{"variants":{}}"#)
+                .add("assets/minecraft/atlases/big.json", &atlas)
+                .build(),
+        )
+        .unwrap();
+        assert_eq!(
+            a.permutation("t999_p0"),
+            Some(PermSource {
+                base: "t999".into(),
+                palette_key: "key".into(),
+                palette: "pal/0".into(),
+            })
+        );
+        assert_eq!(a.permutation("t0_p999").unwrap().palette, "pal/999");
+        assert_eq!(a.permutation("t1000_p0"), None);
+        assert!(!a.has_texture("t0_p1000"));
+        // what is kept grows with the file, not with the product of its two lists
+        assert!(
+            a.permutation_entries() <= 2 * n,
+            "{} entries kept for {n} textures and {n} permutations",
+            a.permutation_entries()
+        );
+    }
+
+    #[test]
+    fn a_big_key_palette_is_swapped_without_comparing_every_pair() {
+        // 65,536 distinct colours: comparing each with every other is 2,000 million steps
+        let key = |x: u32, y: u32| [x as u8, y as u8, 7, 255];
+        let swapped = |x: u32, y: u32| [y as u8, 9, x as u8, 255];
+        let base = png(64, 64, |x, y| match (x + y) % 3 {
+            0 => key(x * 4, y * 4),
+            // a colour the key does not have stays, and so does a transparent texel of a key colour
+            1 => [1, 2, 3, 255],
+            _ => [x as u8, y as u8, 7, 0],
+        });
+        let jar = |key_png: Vec<u8>| {
+            JarBuilder::new()
+                .add("assets/minecraft/blockstates/x.json", r#"{"variants":{}}"#)
+                .add("assets/minecraft/atlases/a.json",
+                     r#"{"sources":[{"type":"paletted_permutations","textures":["b"],"palette_key":"k","permutations":{"p":"pal"}}]}"#)
+                .add("assets/minecraft/textures/b.png", &base)
+                .add("assets/minecraft/textures/k.png", key_png)
+                .add("assets/minecraft/textures/pal.png", png(256, 256, swapped))
+                .build()
+        };
+        let started = std::time::Instant::now();
+        let a = Assets::from_jar(jar(png(256, 256, key))).unwrap();
+        let t = a.texture("b_p").unwrap();
+        for y in 0..64 {
+            for x in 0..64 {
+                let want = match (x + y) % 3 {
+                    0 => swapped(x * 4, y * 4),
+                    1 => [1, 2, 3, 255],
+                    _ => [x as u8, y as u8, 7, 0],
+                };
+                assert_eq!(t.sheet.pixel(x, y), want, "{x},{y}");
+            }
+        }
+        // the last colour of the key is the first one again: found, and refused as before
+        let dup = png(256, 256, |x, y| {
+            if (x, y) == (255, 255) {
+                key(0, 0)
+            } else {
+                key(x, y)
+            }
+        });
+        let e = Assets::from_jar(jar(dup))
+            .unwrap()
+            .texture("b_p")
+            .unwrap_err();
+        assert!(
+            e.downcast_ref::<Refused>()
+                .is_some_and(|r| r.0.contains("twice")),
+            "{e:#}"
+        );
+        // milliseconds with the palette sorted once; comparing every pair took 11 seconds in a
+        // test build on the machine that measured it
+        let took = started.elapsed();
+        assert!(took.as_secs() < 5, "the two swaps took {took:?}");
     }
 
     #[test]

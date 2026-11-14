@@ -466,7 +466,10 @@ multiple of what a real jar needs (`check` prints the biggest it met next to the
 An entry is read through a limit, never sized from what its zip header declares (a 408 KB jar that declared 100 bytes and
 inflated to 400 MiB now stops at the limit), and a 42 MB JSON that went to a 1.6 GB peak is refused from its header. The
 sweep peaks at 86 MB over all eight jars. Names of entries with control or direction-override characters are not indexed, and
-text that came from a jar is printed with them escaped, so a hostile jar cannot rewrite a terminal. `Quad::texture` is an
+text that came from a jar is printed with them escaped, so a hostile jar cannot rewrite a terminal. The textures an atlas file
+generates (`paletted_permutations`: every texture times every permutation) are never listed: a name is matched against the
+file's two lists when it is asked for, so what is kept is the size of the file and not the product of its lists, and the
+palette swap sorts the key palette once instead of comparing every colour with every other. `Quad::texture` is an
 `Arc<str>` (one allocation per model, not one per face), a model shares the elements it inherits with its parent
 (one allocation), and quads are grouped by material through a map. An item (or block) that names too many models, or whose
 models add up past the quad limit, is refused as it is baked: the parts after the one that crossed the limit are not baked.
