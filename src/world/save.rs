@@ -103,7 +103,9 @@ impl World {
         }
     }
 
-    /// The dimensions that have region files, `minecraft:overworld` first
+    /// The dimensions that have region files, `minecraft:overworld` first. Each is a name
+    /// [`World::region_dir`] and [`World::regions`] take: a folder under `dimensions` whose name is
+    /// not a dimension name (the game's are lower case, see [`normalize_dimension`]) is left out.
     pub fn dimensions(&self) -> Vec<String> {
         let mut out = Vec::new();
         for d in ["overworld", "the_nether", "the_end"] {
@@ -124,6 +126,11 @@ impl World {
                             continue;
                         };
                         let id = format!("{nsn}:{nn}");
+                        // a folder that is not named as a dimension is (upper case, a space) is
+                        // not one the game made, and `region_dir` has no way to it
+                        if normalize_dimension(&id).ok() != Some((nsn.clone(), nn.clone())) {
+                            continue;
+                        }
                         if n.path().join("region").is_dir() && !out.contains(&id) {
                             extra.push(id);
                         }
@@ -303,6 +310,21 @@ pub(crate) mod tests {
         assert_eq!(w.dimensions(), vec!["minecraft:overworld", "pack:sky"]);
         assert!(w.region_dir("pack:sky").is_ok());
         assert!(World::open(&d).is_err(), "no level.dat");
+        // folders that no dimension name leads to are not listed: whatever is listed can be read
+        for odd in [
+            "MyPack/Sky",
+            "pack/Sky",
+            "pack/s k y",
+            "pack/.hidden",
+            "UPPER/sky",
+        ] {
+            fs::create_dir_all(new.join("dimensions").join(odd).join("region")).unwrap();
+        }
+        let dims = w.dimensions();
+        assert_eq!(dims, vec!["minecraft:overworld", "pack:sky"]);
+        for dim in &dims {
+            assert!(w.regions(dim).is_ok(), "{dim}");
+        }
         fs::remove_dir_all(&d).unwrap();
     }
 }

@@ -1563,6 +1563,33 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_where_a_region_file_belongs_is_a_failed_region_with_the_reason() {
+        let mut a = ChunkSpec::new(0, 0);
+        a.set(1, 64, 1, "minecraft:stone", &[]);
+        let save = write_world("mesher-notfile", "9.9", 9000, &[a], false);
+        let rd = save.join("dimensions/minecraft/overworld/region");
+        std::fs::create_dir_all(rd.join("r.0.1.mca")).unwrap();
+        let assets = world_jar();
+        let w = World::open(&save).unwrap();
+        let mut win = Window::region(0, 0);
+        win.radius = 1;
+        let (m, r) = build(&assets, &w, &BuildOptions::new(win)).unwrap();
+        cleanup(&save);
+        // the region that is there still loads; the other seven around it have no file at all
+        assert_eq!(m.quad_count(), 6);
+        assert_eq!(r.load.failed_regions_count, 1);
+        assert_eq!(r.load.failed_regions.len(), 1);
+        let (x, z, why) = &r.load.failed_regions[0];
+        assert_eq!((*x, *z), (0, 1));
+        assert!(why.contains("not a regular file"), "{why}");
+        let text = r.lines().join("\n");
+        assert!(
+            text.contains("1 region file(s) could not be opened") && text.contains("r.0.1.mca"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn a_scene_over_the_quad_budget_is_refused() {
         let mut c = ChunkSpec::new(0, 0);
         c.fill((0, 64, 0), (5, 64, 5), "minecraft:stone");

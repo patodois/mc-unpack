@@ -18,8 +18,9 @@
 //! a single transparent texel anywhere never occludes (the game may occlude with a block whose
 //! texture has holes only where the block's shape says it does not matter); and a block whose
 //! occlusion shape is full but whose model is not (none in the jars here) does not occlude. A face
-//! with no `cullface` is always kept. The effect is more faces than the game draws, never fewer than
-//! it shows: nothing that is visible in the game is dropped.
+//! with no `cullface` is always kept. The effect is more faces than the game draws, with one possible
+//! exception: a block the game marks as not occluding although its model is a full cube of opaque
+//! textures would still hide its neighbours' faces here (the flag is in code and none was checked).
 //!
 //! # Tints: only where the data says
 //!

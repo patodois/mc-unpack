@@ -4,7 +4,8 @@
 //! folder the user may have got from anywhere. Nothing is sized from a length the file declares
 //! until the bytes for it are known to be there, nesting and the number of tags are capped, and a
 //! tag the format does not allow is an error rather than a guess. Nothing here panics on any input
-//! (the fuzz test in `world/mod.rs` feeds it mutations of real and synthetic files).
+//! (the fuzz tests in `world/fuzz.rs` feed it mutations of synthetic files, and the opt-in ones in
+//! `tests/world_data.rs` mutations of real ones).
 
 use anyhow::{bail, Result};
 

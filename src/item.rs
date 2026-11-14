@@ -310,11 +310,15 @@ fn walk(node: &Value, out: &mut DefaultModels) {
             }
         }
         "condition" => {
-            let branch = node.get("on_false").or_else(|| node.get("on_true"));
+            let branch = match (node.get("on_false"), node.get("on_true")) {
+                (Some(b), _) => Some((b, "on_false")),
+                (None, Some(b)) => Some((b, "on_true (there is no on_false)")),
+                (None, None) => None,
+            };
             match branch {
-                Some(b) => {
+                Some((b, taken)) => {
                     out.notes.push(format!(
-                        "condition on {}: took on_false",
+                        "condition on {}: took {taken}",
                         node.get("property")
                             .and_then(|p| p.as_str())
                             .map(short)
@@ -576,6 +580,33 @@ mod tests {
                 .any(|n| n.contains("potion") && n.contains("no `default`")),
             "{:?}",
             r.notes
+        );
+    }
+
+    #[test]
+    fn a_condition_says_which_branch_it_took() {
+        let model =
+            |m: &str| format!(r#"{{"type":"minecraft:model","model":"minecraft:item/{m}"}}"#);
+        let condition = |branches: &str| {
+            let def: Value = serde_json::from_str(&format!(
+                r#"{{"model":{{"type":"minecraft:condition","property":"minecraft:broken",{branches}}}}}"#
+            ))
+            .unwrap();
+            default_models(&def)
+        };
+        let both = condition(&format!(
+            r#""on_true":{},"on_false":{}"#,
+            model("t"),
+            model("f")
+        ));
+        assert_eq!(both.models[0].model, "minecraft:item/f");
+        assert_eq!(both.notes, ["condition on broken: took on_false"]);
+        // only `on_true`: that is the branch followed, and the note must not name the other
+        let only_true = condition(&format!(r#""on_true":{}"#, model("t")));
+        assert_eq!(only_true.models[0].model, "minecraft:item/t");
+        assert_eq!(
+            only_true.notes,
+            ["condition on broken: took on_true (there is no on_false)"]
         );
     }
 

@@ -329,6 +329,48 @@ fn print_states(a: &Assets, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// What the colour of `--tint INDEX=COLOUR` asks for
+#[derive(Debug, PartialEq)]
+enum TintSpec<'a> {
+    /// `grass@plains`, `foliage@minecraft:jungle`: the colormap at a biome's climate
+    Biome { kind: ColormapKind, biome: &'a str },
+    /// `grass:0.8,0.4`: the colormap at a temperature and a downfall
+    Climate {
+        kind: ColormapKind,
+        temperature: f64,
+        downfall: f64,
+    },
+    /// `#91bd59`
+    Rgb([u8; 3]),
+}
+
+/// Reads the colour of a `--tint`. The `@` form is looked for first: a biome may carry its
+/// namespace (`grass@minecraft:plains`), and that `:` is not the one of `kind:T,D`.
+fn tint_spec(what: &str) -> Result<TintSpec<'_>> {
+    let what = what.trim();
+    let kind_of = |kind: &str| {
+        ColormapKind::parse(kind).ok_or_else(|| anyhow!("{kind:?}: grass, foliage or dry_foliage"))
+    };
+    if let Some((kind, biome)) = what.split_once('@') {
+        return Ok(TintSpec::Biome {
+            kind: kind_of(kind)?,
+            biome,
+        });
+    }
+    if let Some((kind, rest)) = what.split_once(':') {
+        let kind = kind_of(kind)?;
+        let (t, d) = rest
+            .split_once(',')
+            .ok_or_else(|| anyhow!("{what}: expected {}:TEMPERATURE,DOWNFALL", kind.name()))?;
+        return Ok(TintSpec::Climate {
+            kind,
+            temperature: t.trim().parse()?,
+            downfall: d.trim().parse()?,
+        });
+    }
+    Ok(TintSpec::Rgb(parse_rgb(what)?))
+}
+
 fn parse_tint(a: &Assets, spec: &str) -> Result<(u32, Tint)> {
     let (idx, what) = spec
         .split_once('=')
@@ -337,32 +379,26 @@ fn parse_tint(a: &Assets, spec: &str) -> Result<(u32, Tint)> {
         .trim()
         .parse()
         .with_context(|| format!("tint index {idx:?}"))?;
-    let what = what.trim();
-    if let Some((kind, rest)) = what.split_once(':') {
-        let kind = ColormapKind::parse(kind)
-            .ok_or_else(|| anyhow!("{kind:?}: grass, foliage or dry_foliage"))?;
-        let (t, d) = rest
-            .split_once(',')
-            .ok_or_else(|| anyhow!("{what}: expected {}:TEMPERATURE,DOWNFALL", kind.name()))?;
-        return Ok((
-            idx,
-            Tint::Colormap {
-                kind,
-                temperature: t.trim().parse()?,
-                downfall: d.trim().parse()?,
-            },
-        ));
-    }
-    if let Some((kind, biome)) = what.split_once('@') {
-        let kind = ColormapKind::parse(kind)
-            .ok_or_else(|| anyhow!("{kind:?}: grass, foliage or dry_foliage"))?;
-        let (t, notes) = a.tint_for_biome(kind, biome)?;
-        for n in notes {
-            eprintln!("note: {}", esc(&n));
+    let tint = match tint_spec(what)? {
+        TintSpec::Biome { kind, biome } => {
+            let (t, notes) = a.tint_for_biome(kind, biome)?;
+            for n in notes {
+                eprintln!("note: {}", esc(&n));
+            }
+            t
         }
-        return Ok((idx, t));
-    }
-    Ok((idx, Tint::Rgb(parse_rgb(what)?)))
+        TintSpec::Climate {
+            kind,
+            temperature,
+            downfall,
+        } => Tint::Colormap {
+            kind,
+            temperature,
+            downfall,
+        },
+        TintSpec::Rgb(c) => Tint::Rgb(c),
+    };
+    Ok((idx, tint))
 }
 
 fn file_name_for(id: &str) -> String {
@@ -1017,5 +1053,40 @@ mod tests {
         assert_eq!(t("/home/ann2/x"), "/home/ann2/x");
         assert_eq!(t("/srv/home/ann/x"), "/srv/home/ann/x");
         assert_eq!(tilde_with(Path::new("/x"), "/"), "/x");
+    }
+
+    #[test]
+    fn a_tint_biome_may_carry_its_namespace() {
+        let grass = ColormapKind::Grass;
+        assert_eq!(
+            tint_spec("grass@plains").unwrap(),
+            TintSpec::Biome {
+                kind: grass,
+                biome: "plains"
+            }
+        );
+        // the `:` of the namespace is not the one of `kind:T,D`
+        assert_eq!(
+            tint_spec(" foliage@minecraft:jungle").unwrap(),
+            TintSpec::Biome {
+                kind: ColormapKind::Foliage,
+                biome: "minecraft:jungle"
+            }
+        );
+        assert_eq!(
+            tint_spec("grass:0.8, 0.4").unwrap(),
+            TintSpec::Climate {
+                kind: grass,
+                temperature: 0.8,
+                downfall: 0.4
+            }
+        );
+        assert_eq!(
+            tint_spec("#91bd59").unwrap(),
+            TintSpec::Rgb([0x91, 0xbd, 0x59])
+        );
+        for bad in ["water@plains", "water:0.5,0.5", "grass:0.5", "91bd5", ""] {
+            assert!(tint_spec(bad).is_err(), "{bad:?}");
+        }
     }
 }

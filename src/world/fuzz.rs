@@ -178,16 +178,19 @@ fn the_chunk_reader_and_the_block_table_survive_mutated_chunks() {
 #[test]
 fn the_decompressors_survive_mutated_streams() {
     let data: Vec<u8> = (0..5000u32).map(|i| (i / 7) as u8).collect();
-    let real_lz4 = {
-        // the real block of compress.rs inside the stream framing
-        let mut s = ctests::lz4_stored(&data);
-        s.truncate(s.len());
-        s
-    };
+    // LZ4 twice: blocks stored raw, and the real compressed block of compress.rs, which is the
+    // one that reaches the match decoder (a stored block never does)
+    let (compressed_lz4, held) = ctests::lz4_compressed();
+    assert_eq!(compressed_lz4[8] & 0xF0, 0x20, "not a compressed block");
+    assert_eq!(
+        decompress(Compression::Lz4, &compressed_lz4, 1 << 16).unwrap(),
+        held
+    );
     for (kind, bytes) in [
         (Compression::Zlib, ctests::zlib(&data)),
         (Compression::Gzip, ctests::gzip(&data)),
-        (Compression::Lz4, real_lz4),
+        (Compression::Lz4, ctests::lz4_stored(&data)),
+        (Compression::Lz4, compressed_lz4),
         (Compression::None, data.clone()),
     ] {
         fuzz(kind.name(), &bytes, rounds(3000), |m| {

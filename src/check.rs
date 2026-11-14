@@ -273,6 +273,7 @@ fn check_models(a: &Assets, r: &mut Report) {
     }
     // Blocks: bake every model every blockstate mentions
     let mut referenced: BTreeSet<String> = BTreeSet::new();
+    let mut item_textures: BTreeSet<String> = BTreeSet::new();
     for n in a.block_names() {
         let Ok(bs) = a.blockstate(&n) else { continue };
         let mut inside = Vec::new();
@@ -366,7 +367,7 @@ fn check_models(a: &Assets, r: &mut Report) {
                         .cloned(),
                 );
                 for q in b.quads() {
-                    referenced.insert(q.texture.to_string());
+                    item_textures.insert(q.texture.to_string());
                 }
                 if let Some(lo) = b.report.left_out {
                     r.items_left_out
@@ -381,10 +382,17 @@ fn check_models(a: &Assets, r: &mut Report) {
             }
         }
     }
-    // Every texture a face uses has to exist and decode (the pass above only counted PNGs)
+    // Every texture a face uses has to exist and decode (the pass above only counted PNGs). One
+    // that only items use is a failure of the items, not of the blocks.
     for t in &referenced {
         if let Err(e) = a.texture(t) {
             r.blocks.failed += 1;
+            r.fail("texture of a face", t, e);
+        }
+    }
+    for t in item_textures.difference(&referenced) {
+        if let Err(e) = a.texture(t) {
+            r.items.failed += 1;
             r.fail("texture of a face", t, e);
         }
     }
@@ -502,6 +510,54 @@ mod tests {
         // item/generated is a template
         assert_eq!(r.item_templates, 1);
         assert!(r.textures.ok >= 3);
+    }
+
+    #[test]
+    fn a_missing_texture_only_an_item_uses_is_a_failed_item_not_a_failed_block() {
+        use crate::jar::testjar::{png, JarBuilder};
+        let face = |texture: &str| {
+            format!(
+                r##"{{"textures":{{"all":"{texture}"}},"elements":[{{"from":[0,0,0],"to":[16,16,16],"faces":{{"up":{{"texture":"#all"}}}}}}]}}"##
+            )
+        };
+        let jar = |block_texture: &str| {
+            let a = JarBuilder::new()
+                .add(
+                    "assets/minecraft/blockstates/b.json",
+                    r#"{"variants":{"":{"model":"block/b"}}}"#,
+                )
+                .add("assets/minecraft/models/block/b.json", face(block_texture))
+                // an item with elements of its own, on a texture the jar has no PNG for
+                .add("assets/minecraft/models/item/tool.json", face("item/nope"))
+                .add(
+                    "assets/minecraft/textures/block/t.png",
+                    png(1, 1, |_, _| [0, 0, 0, 255]),
+                )
+                .build();
+            run(&Assets::from_jar(a).unwrap()).unwrap()
+        };
+        let r = jar("block/t");
+        assert_eq!(
+            (r.blocks.failed, r.items.failed),
+            (0, 1),
+            "{:?}",
+            r.failures
+        );
+        assert!(
+            r.failures
+                .iter()
+                .any(|f| f.contains("texture of a face item/nope")),
+            "{:?}",
+            r.failures
+        );
+        // a block uses it too: the block's failure, once
+        let r = jar("item/nope");
+        assert_eq!(
+            (r.blocks.failed, r.items.failed),
+            (1, 0),
+            "{:?}",
+            r.failures
+        );
     }
 
     #[test]

@@ -291,7 +291,9 @@ pub fn load(
     for rz in region_span(az0, az1) {
         for rx in region_span(ax0, ax1) {
             let p = region_dir.join(format!("r.{rx}.{rz}.mca"));
-            if !p.is_file() {
+            // most regions of a window have no file, and that is no failure; a folder or a pipe
+            // by a region's name is one, and `Region::open` says which without opening it
+            if matches!(std::fs::metadata(&p), Err(e) if e.kind() == std::io::ErrorKind::NotFound) {
                 continue;
             }
             let r = match Region::open(&p) {
@@ -325,9 +327,15 @@ pub fn load(
     let mut grid = BlockGrid::new(ax0, az0, ax1, az1);
     for (rx, rz) in regions {
         // opened a moment ago; if it changed since, it is a failed region like any other
-        let Ok(mut r) = Region::open(&region_dir.join(format!("r.{rx}.{rz}.mca"))) else {
-            stats.failed_regions_count += 1;
-            continue;
+        let mut r = match Region::open(&region_dir.join(format!("r.{rx}.{rz}.mca"))) {
+            Ok(r) => r,
+            Err(e) => {
+                stats.failed_regions_count += 1;
+                if stats.failed_regions.len() < 20 {
+                    stats.failed_regions.push((rx, rz, format!("{e:#}")));
+                }
+                continue;
+            }
         };
         for lz in 0..32u32 {
             for lx in 0..32u32 {

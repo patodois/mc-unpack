@@ -320,6 +320,23 @@ pub mod tests {
 
     const BLOCK: &str = "ff016d696e6563726166743a73746f6e652010000dff1c000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20212223242526276162630300021f580100ff14505858585858";
 
+    /// The real compressed block (method 0x20, which the match decoder reads) in the stream
+    /// framing with its end mark, and the 412 bytes it holds
+    pub fn lz4_compressed() -> (Vec<u8>, Vec<u8>) {
+        let (block, want) = (unhex(BLOCK), sample());
+        let mut s = Vec::new();
+        s.extend_from_slice(LZ4_MAGIC);
+        s.push(0x20 | 9);
+        s.extend_from_slice(&(block.len() as i32).to_le_bytes());
+        s.extend_from_slice(&(want.len() as i32).to_le_bytes());
+        s.extend_from_slice(&(xxh32(&want, LZ4_SEED) & 0x0FFF_FFFF).to_le_bytes());
+        s.extend_from_slice(&block);
+        s.extend_from_slice(LZ4_MAGIC);
+        s.push(0x10 | 9);
+        s.extend_from_slice(&[0; 12]);
+        (s, want)
+    }
+
     #[test]
     fn xxhash_matches_the_reference_values() {
         // the empty string with seed 0, and the content checksum the lz4 tool wrote for `sample`
@@ -339,16 +356,8 @@ pub mod tests {
         lz4_block(&block, &mut out, 412).unwrap();
         assert_eq!(out, want);
         // and through the stream framing
-        let mut s = Vec::new();
-        s.extend_from_slice(LZ4_MAGIC);
-        s.push(0x20 | 9);
-        s.extend_from_slice(&(block.len() as i32).to_le_bytes());
-        s.extend_from_slice(&412i32.to_le_bytes());
-        s.extend_from_slice(&(xxh32(&want, LZ4_SEED) & 0x0FFF_FFFF).to_le_bytes());
-        s.extend_from_slice(&block);
-        s.extend_from_slice(LZ4_MAGIC);
-        s.push(0x10 | 9);
-        s.extend_from_slice(&[0; 12]);
+        let (s, data) = lz4_compressed();
+        assert_eq!(data, want);
         assert_eq!(decompress(Compression::Lz4, &s, 1 << 20).unwrap(), want);
     }
 
