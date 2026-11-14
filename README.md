@@ -411,6 +411,7 @@ for line in report.lines() { println!("{line}"); }                // what was le
 | distinct block states (keyed by the properties the blockstate mentions, and `waterlogged`), biomes | 60,000, 4,096 |
 | quads held by all the block states together (about 110 bytes each) | 2,000,000 |
 | a palette entry: name, a property, properties | 256, 128 bytes, 64 |
+| region coordinates | block positions must fit 32 bits, as in the game: regions -4,194,303 to 4,194,302 (the game's world ends at region 58,593); a file named for one beyond is refused, and not listed |
 
 Measured (release, this Mac): a whole region of 26.3 (about 400 finished chunks) takes 0.1 s and 125 MB; a synthetic region of 1,024
 chunks and 100 million blocks takes 1.2 s and 190 MB when it is solid stone (1.3 million quads after culling, 602 million faces

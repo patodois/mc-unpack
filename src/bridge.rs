@@ -256,6 +256,10 @@ impl Minecraft {
             let Ok(regions) = w.regions(&d) else { continue };
             let Ok(dir) = w.region_dir(&d) else { continue };
             for (x, z) in regions {
+                // a file named for a region past the world's coordinates would not load: not offered
+                if mesher::Window::region(x, z).chunk_range().is_err() {
+                    continue;
+                }
                 let file = dir.join(format!("r.{x}.{z}.mca"));
                 // a region of chunks the game never finished shows nothing: not offered
                 if !crate::world::grid::has_finished_chunk(&file) {
@@ -898,6 +902,36 @@ mod tests {
             .unwrap()
             .is_empty());
         crate::world::testworld::cleanup(&save);
+    }
+
+    #[test]
+    fn a_region_past_the_worlds_coordinates_is_not_offered() {
+        use crate::world::save::SaveRef;
+        use crate::world::testworld::*;
+        // r.4194304.0.mca: a finished chunk whose blocks would start at x = 2^31
+        let mut far = ChunkSpec::new(4_194_304 * 32, 0);
+        far.set(1, 64, 1, "minecraft:stone", &[]);
+        let mut near = ChunkSpec::new(0, 0);
+        near.set(1, 64, 1, "minecraft:stone", &[]);
+        let save = write_world("bridge-far", "9.9", 9000, &[far, near], false);
+        let mc = Minecraft::from_assets(world_jar())
+            .unwrap()
+            .with_saves(vec![SaveRef {
+                label: "W".into(),
+                path: save.clone(),
+                instance: None,
+            }]);
+        let ids: Vec<String> = mc
+            .list("world/")
+            .unwrap()
+            .into_iter()
+            .map(|l| l.id)
+            .collect();
+        assert_eq!(ids, ["world/W/0,0"]);
+        // asked for by name, it is an error that says why
+        let e = mc.load_scene("world/W/4194304,0").unwrap_err().to_string();
+        cleanup(&save);
+        assert!(e.contains("outside the world"), "{e}");
     }
 
     #[test]

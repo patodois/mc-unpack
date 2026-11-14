@@ -35,6 +35,24 @@ pub struct Window {
     pub y: Option<(i32, i32)>,
 }
 
+/// The coordinate of a chunk's first block, when the chunk's blocks and the blocks beside it (which
+/// the culling looks at) have coordinates at all. Block coordinates are 32-bit, here as in the
+/// game, so chunks from 2^27 on (region 4,194,304) have none. No save of the game reaches them:
+/// its world ends about 30,000,000 blocks from the origin (chunk 1,875,000, region 58,593), a
+/// seventieth of the way there.
+fn block_origin(chunk: i32) -> Option<i32> {
+    let first = chunk.checked_mul(16)?;
+    first.checked_sub(1)?;
+    first.checked_add(16)?;
+    Some(first)
+}
+
+fn outside_the_world(what: std::fmt::Arguments) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{what} is outside the world's coordinates: its blocks would be past the 32-bit positions the game has (its world ends about 30,000,000 blocks from the origin, region 58,593)"
+    )
+}
+
 impl Window {
     pub fn region(x: i32, z: i32) -> Window {
         Window {
@@ -55,11 +73,8 @@ impl Window {
         }
         let r = self.radius as i64;
         let c = |region: i32, off: i64| -> Result<i32> {
-            i32::try_from((region as i64 + off) * 32 + if off > 0 { 31 } else { 0 }).map_err(|_| {
-                anyhow::anyhow!(
-                    "region {region} with radius {r} is outside the world's coordinates"
-                )
-            })
+            i32::try_from((region as i64 + off) * 32 + if off > 0 { 31 } else { 0 })
+                .map_err(|_| outside_the_world(format_args!("region {region} with radius {r}")))
         };
         let (mut x0, mut z0, mut x1, mut z1) = (
             c(self.region.0, -r)?,
@@ -90,6 +105,15 @@ impl Window {
             if lo > hi {
                 bail!("--y {lo},{hi}: the minimum must not be above the maximum");
             }
+        }
+        if [x0, z0, x1, z1]
+            .into_iter()
+            .any(|c| block_origin(c).is_none())
+        {
+            return Err(outside_the_world(format_args!(
+                "region {},{} with radius {r} (chunks {x0}..{x1} x {z0}..{z1})",
+                self.region.0, self.region.1
+            )));
         }
         Ok((x0, z0, x1, z1))
     }
@@ -702,6 +726,11 @@ impl Mesher<'_> {
                 groups: Vec::new(),
             });
         };
+        // `Window::chunk_range` refuses such a window first; this keeps the sums below in range
+        // whoever calls
+        let (Some(ox), Some(oz)) = (block_origin(cx), block_origin(cz)) else {
+            return Err(outside_the_world(format_args!("chunk {cx},{cz}")));
+        };
         let mut groups: Vec<Group> = Vec::new();
         let mut group_of: HashMap<u32, usize> = HashMap::new();
         for (si, sec) in cb.secs.iter().enumerate() {
@@ -744,7 +773,7 @@ impl Mesher<'_> {
                         if !matches!(st.fate, Fate::Drawn) {
                             continue;
                         }
-                        let (wx, wz) = (cx * 16 + lx, cz * 16 + lz);
+                        let (wx, wz) = (ox + lx, oz + lz);
                         // the state of the block on a side, fetched when a face asks for it
                         let mut nb = [u16::MAX; 6];
                         // the colour of this block's tinted faces
@@ -883,6 +912,59 @@ mod tests {
         w.region = (0, 0);
         w.y = Some((5, 4));
         assert!(w.chunk_range().is_err());
+    }
+
+    #[test]
+    fn a_region_whose_blocks_have_no_coordinates_is_refused_not_wrapped() {
+        // Region 4,194,304 starts at chunk 2^27, whose blocks would start at x = 2^31: block
+        // coordinates are 32-bit, in the game too, and the world ends about 30,000,000 blocks
+        // from the origin (region 58,593). The regions one step nearer are refused as well: the
+        // block beside their last column, which the culling looks at, has no coordinate either.
+        const FAR: i32 = 4_194_304;
+        let spec = |rx: i32, rz: i32, lx: i32, lz: i32| {
+            let mut c = ChunkSpec::new(rx * 32 + lx, rz * 32 + lz);
+            // on the chunk's outer edge: its side faces ask for the block beside the chunk
+            c.fill((0, 64, 0), (15, 64, 15), "minecraft:stone");
+            c
+        };
+        let refused = [
+            (FAR, 0, 0, 0),
+            (0, FAR - 1, 0, 31),
+            (-FAR, 0, 0, 0),
+            (0, -FAR - 1, 31, 31),
+        ];
+        let read = [
+            (FAR - 2, 0, 31, 0),
+            (0, -FAR + 1, 0, 0),
+            (-FAR + 1, FAR - 2, 0, 31),
+        ];
+        let chunks: Vec<ChunkSpec> = refused
+            .iter()
+            .chain(&read)
+            .map(|&(rx, rz, lx, lz)| spec(rx, rz, lx, lz))
+            .collect();
+        let save = write_world("mesher-far", "9.9", 9000, &chunks, false);
+        let a = world_jar();
+        let w = World::open(&save).unwrap();
+        for (rx, rz, ..) in refused {
+            let win = Window::region(rx, rz);
+            let e = build(&a, &w, &BuildOptions::new(win.clone()))
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains("outside the world"), "{rx},{rz}: {e}");
+            let e = win.chunk_range().unwrap_err().to_string();
+            assert!(e.contains("outside the world"), "{rx},{rz}: {e}");
+        }
+        // the last regions whose blocks, and the blocks beside them, have coordinates still read
+        for (rx, rz, ..) in read {
+            let (m, r) = build(&a, &w, &BuildOptions::new(Window::region(rx, rz))).unwrap();
+            // a 16 x 16 slab alone: top, bottom and four sides of 16
+            assert_eq!(
+                (m.quad_count(), r.blocks_drawn, r.culled),
+                (2 * 256 + 4 * 16, 256, 4 * 240)
+            );
+        }
+        cleanup(&save);
     }
 
     #[test]
