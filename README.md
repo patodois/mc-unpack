@@ -399,7 +399,7 @@ let (scene, report) = mc.load_world_report("world/New World/0,0?chunks=0,0,7,7")
 for line in report.lines() { println!("{line}"); }                // what was left out, and why
 ```
 
-**Memory and limits.** What a save can make this crate hold is capped, and a window over a cap is refused with the number, never cut short. The quad cap is checked block by block, so a scene never holds more than the cap plus one block's quads (at most 1,040); every other cap is checked before the memory it guards is taken:
+**Memory and limits.** What a save can make this crate hold is capped, with the one exception the table names (the length of a biome name), and a window over a cap is refused with the number, never cut short. Three caps are checked just after what they count: the quad cap block by block, so a scene never holds more than the cap plus one block's quads (at most 1,040); the block-data cap chunk by chunk, so a load holds at most one chunk more (2 MiB: 256 sections); and the quads of the block states state by state (at most 1,040 more). Every other cap is checked before the memory it guards is taken:
 
 | What | Limit |
 |------|-------|
@@ -409,8 +409,11 @@ for line in report.lines() { println!("{line}"); }                // what was le
 | one chunk, uncompressed / an external `.mcc` | 24 MiB / 32 MiB |
 | tags in one NBT document, nesting | 2,000,000, 128 |
 | distinct block states (keyed by the properties the blockstate mentions, and `waterlogged`), biomes | 60,000, 4,096 |
+| a biome name | **not capped**: an NBT string, 65,535 bytes at most. A load keeps up to 4,096 distinct names (three copies of each: about 800 MiB if a save were made of the longest), and the report lists the ones the jar has no data for |
 | quads held by all the block states together (about 110 bytes each) | 2,000,000 |
 | a palette entry: name, a property, properties | 256, 128 bytes, 64 |
+| a chunk's `Status` | 256 bytes (the game's are the names of its generation steps, 30 bytes at most); a chunk with a longer one is a failed chunk, with that reason |
+| bytes of texture images held: the first frame of each texture the blocks use, and a copy per biome colour it is drawn in | 256 MiB (a few MiB for every texture of a real jar) |
 | region coordinates | block positions must fit 32 bits, as in the game: regions -4,194,303 to 4,194,302 (the game's world ends at region 58,593); a file named for one beyond is refused, and not listed |
 
 Measured (release, this Mac): a whole region of 26.3 (about 400 finished chunks) takes 0.1 s and 125 MB; a synthetic region of 1,024

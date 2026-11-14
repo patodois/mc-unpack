@@ -11,7 +11,7 @@ use std::path::Path;
 use anyhow::{bail, Context, Result};
 
 use super::biomes::{BiomeTable, NO_BIOME};
-use super::blocks::{StateTable, AIR};
+use super::blocks::{OverBudget, StateTable, AIR};
 use super::chunk::{is_finished, parse_chunk, Chunk, ChunkError, Indices, SECTION_BLOCKS};
 use super::nbt;
 use super::region::Region;
@@ -383,6 +383,8 @@ pub fn load(
                             }
                         }
                     }
+                    // a budget of the whole load: the load is refused, with the number
+                    Err(ChunkError::Bad(e)) if e.is::<OverBudget>() => return Err(e),
                     Err(ChunkError::Bad(e)) => {
                         if inw {
                             stats.failed_count += 1;

@@ -49,6 +49,12 @@ pub const MAX_NAME: usize = 256;
 pub const MAX_PROP: usize = 128;
 pub const MAX_PROPS: usize = 64;
 
+/// A chunk's `Status` is the name of a step of the game's world generation. The steps are a fixed
+/// list in the game's code, not data a save or a datapack can add to, and the longest the game
+/// writes is 30 bytes (`minecraft:structure_references`). A longer one is no status of any
+/// version, and a load keeps one count per distinct status.
+pub const MAX_STATUS: usize = 256;
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PaletteEntry {
     /// `minecraft:oak_stairs`
@@ -317,7 +323,15 @@ pub fn parse_chunk(root: &Tag, expect: Option<(i32, i32)>) -> Result<Chunk, Chun
             return Err(anyhow!("the chunk says it is at {x},{z} but sits at {ex},{ez}").into());
         }
     }
-    let status = level.get("Status").and_then(Tag::as_str).map(String::from);
+    let status = level.get("Status").and_then(Tag::as_str);
+    if let Some(long) = status.filter(|s| s.len() > MAX_STATUS) {
+        return Err(anyhow!(
+            "the chunk's status is {} bytes long; the game's are the names of its generation steps, and none is over {MAX_STATUS} bytes",
+            long.len()
+        )
+        .into());
+    }
+    let status = status.map(String::from);
     let secs = match level.get(if old { "Sections" } else { "sections" }) {
         Some(s) => s.as_list().context("sections is not a list")?,
         None => &[],
@@ -642,6 +656,36 @@ pub mod tests {
         ]))
         .unwrap_err();
         assert!(e.to_string().contains("not a string"));
+    }
+
+    #[test]
+    fn a_status_longer_than_any_generation_step_is_a_damaged_chunk() {
+        let with_status = |status: &str| {
+            compound(vec![
+                ("xPos", Tag::Int(0)),
+                ("zPos", Tag::Int(0)),
+                ("Status", string(status)),
+            ])
+        };
+        // the longest the game writes, and the longest this reads: unfinished chunks, as before
+        for status in [
+            "minecraft:structure_references".to_string(),
+            "s".repeat(MAX_STATUS),
+        ] {
+            let c = parse_chunk(&with_status(&status), None).unwrap();
+            assert_eq!(c.status.as_deref(), Some(status.as_str()));
+            assert!(!is_finished(&c.status));
+        }
+        // one byte more, and the 65,535 bytes an NBT string can hold: not kept as a status
+        for len in [MAX_STATUS + 1, 65_535] {
+            match parse_chunk(&with_status(&"s".repeat(len)), None) {
+                Err(ChunkError::Bad(e)) => {
+                    let e = e.to_string();
+                    assert!(e.contains("status") && e.len() < 300, "{e}");
+                }
+                other => panic!("a status of {len} bytes: {other:?}"),
+            }
+        }
     }
 
     #[test]

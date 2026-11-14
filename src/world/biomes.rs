@@ -10,6 +10,10 @@ use crate::tint::ColormapKind;
 pub const NO_BIOME: u16 = 0;
 
 /// Distinct biome names one load keeps (a game with every datapack has a few hundred)
+///
+/// The length of a name is not capped: it is as long as the save wrote it, an NBT string of 65,535
+/// bytes at most. A datapack names its own biomes, and no number measured from real saves says how
+/// long such a name gets, so a cap here would be a guess (the README's limits table says so).
 pub const MAX_BIOMES: usize = 4096;
 
 pub struct BiomeTable<'a> {
