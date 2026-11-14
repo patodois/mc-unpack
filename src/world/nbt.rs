@@ -183,6 +183,11 @@ struct Reader<'a> {
     b: &'a [u8],
     pos: usize,
     tags_left: usize,
+    /// Items the lists being read have room reserved for and have not read yet, over every level
+    /// of nesting
+    reserved: usize,
+    #[cfg(test)]
+    reserved_peak: usize,
 }
 
 impl<'a> Reader<'a> {
@@ -295,9 +300,26 @@ impl<'a> Reader<'a> {
                         self.remaining()
                     );
                 }
-                let mut v = Vec::with_capacity(n.min(self.tags_left));
-                for _ in 0..n {
-                    v.push(self.payload(et, depth + 1)?);
+                // Room is reserved only for items the input can still hold: an item takes at least
+                // `min_payload_len` bytes and one tag, and each item the lists around this one are
+                // still waiting for takes at least a byte and a tag after it. A list is not sized
+                // from its own count alone: 128 nested lists that each declare millions of items
+                // would reserve gigabytes between them.
+                let room = n
+                    .min(self.remaining().saturating_sub(self.reserved) / min_payload_len(et))
+                    .min(self.tags_left.saturating_sub(self.reserved));
+                self.reserved += room;
+                #[cfg(test)]
+                {
+                    self.reserved_peak = self.reserved_peak.max(self.reserved);
+                }
+                let mut v = Vec::with_capacity(room);
+                for i in 0..n {
+                    let item = self.payload(et, depth + 1)?;
+                    if i < room {
+                        self.reserved -= 1;
+                    }
+                    v.push(item);
                 }
                 Tag::List(v)
             }
@@ -346,6 +368,18 @@ impl<'a> Reader<'a> {
     }
 }
 
+/// The fewest bytes the payload of a tag of type `ty` (1 to 12) takes: the number itself, an empty
+/// string or array (its length), an empty list (item type and length), a compound's End tag
+fn min_payload_len(ty: u8) -> usize {
+    match ty {
+        1 | 10 => 1,
+        2 | 8 => 2,
+        9 => 5,
+        4 | 6 => 8,
+        _ => 4,
+    }
+}
+
 /// Java's "modified UTF-8": the text is UTF-16 code units written as one to three bytes each, NUL as
 /// `C0 80`, and a character outside the first plane as a surrogate pair of two three-byte units
 /// (CESU-8). Plain UTF-8 reads as itself; a byte that is none of these becomes U+FFFD.
@@ -390,6 +424,9 @@ pub fn parse(data: &[u8]) -> Result<(String, Tag)> {
         b: data,
         pos: 0,
         tags_left: MAX_TAGS,
+        reserved: 0,
+        #[cfg(test)]
+        reserved_peak: 0,
     };
     let ty = r.u8()?;
     if ty == 0 {
@@ -399,7 +436,10 @@ pub fn parse(data: &[u8]) -> Result<(String, Tag)> {
         bail!("NBT document starts with an unknown tag type {ty}");
     }
     let name = r.string()?;
-    let tag = r.payload(ty, 0)?;
+    let tag = r.payload(ty, 0);
+    #[cfg(test)]
+    tests::RESERVED_PEAK.with(|p| p.set(r.reserved_peak));
+    let tag = tag?;
     if r.remaining() != 0 {
         bail!("{} bytes follow the NBT root", r.remaining());
     }
@@ -604,6 +644,46 @@ mod tests {
         b.extend(std::iter::repeat_n(0u8, MAX_TAGS + 10));
         let e = parse(&b).unwrap_err().to_string();
         assert!(e.contains("more than"), "{e}");
+    }
+
+    thread_local! {
+        /// The most list items the last `parse` of this thread had room reserved for at one time
+        pub(super) static RESERVED_PEAK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    #[test]
+    fn nested_lists_together_reserve_no_more_than_the_input_can_hold() {
+        // 128 lists, each the first item of the one before and each declaring a million items, then
+        // a million bytes: every list alone passes the check against the bytes left
+        let n = 1_000_000usize;
+        let mut b = vec![9u8, 0, 0];
+        for level in 0..MAX_DEPTH {
+            b.push(if level + 1 == MAX_DEPTH { 1 } else { 9 });
+            b.extend_from_slice(&(n as i32).to_be_bytes());
+        }
+        b.extend(std::iter::repeat_n(0u8, n));
+        // the innermost list is read whole; the list around it then finds no second item
+        let e = parse(&b).unwrap_err().to_string();
+        assert!(e.contains("ends early"), "{e}");
+        let peak = RESERVED_PEAK.with(|p| p.get());
+        assert!(
+            peak <= b.len(),
+            "room for {peak} items was reserved for a document of {} bytes",
+            b.len()
+        );
+        // what is accepted is unchanged: lists in lists, longer than any reservation rule needs
+        let rows: Vec<Tag> = (0..300)
+            .map(|i| Tag::List((0..i).map(|j| Tag::Short(j as i16)).collect()))
+            .collect();
+        let doc = compound(vec![
+            ("rows", Tag::List(rows)),
+            ("bytes", Tag::List(vec![Tag::Byte(1); 70_000])),
+            ("empty", Tag::List(Vec::new())),
+            ("texts", Tag::List(vec![string("a"), string("")])),
+        ]);
+        let bytes = document("d", &doc);
+        assert_eq!(parse(&bytes).unwrap(), ("d".to_string(), doc));
+        assert!(RESERVED_PEAK.with(|p| p.get()) <= bytes.len());
     }
 
     #[test]
