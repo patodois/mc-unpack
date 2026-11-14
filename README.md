@@ -483,14 +483,18 @@ materials; options are the checker's, `--help` lists them; put `--mc-version` be
 
 Tests: `cargo test` runs 232 unit tests on tiny synthetic jars and saves built in the tests (no game data anywhere; they include a zip
 that lies about its size, PNGs over the limits, NBT with lengths past the file, region tables that point anywhere, and regions
-written chunk by chunk in the 1.13 and in the current layout) and 24 real-data tests
-in `tests/game_data.rs` that read the installed jars and skip, saying so, where a version is not installed. The real-data
+written chunk by chunk in the 1.13 and in the current layout). It reads no install and no save, and writes only to the
+target folder and to the system temp folder (the synthetic jars and saves).
+
+The tests on real data are opt-in: `MC_UNPACK_REAL_DATA=1 cargo test` also runs the 24 tests
+in `tests/game_data.rs` that read the installed jars and skip, saying so, where a version is not installed. Without the
+variable they skip before anything is looked for (`cargo test -- --nocapture` shows the message). The real-data
 tests pin, among others: grass tint equals plains `#91bd59` from the jar's own colormap and biome; stairs facing east have
 their tall side to the east in 1.12.2, 1.21.1 and 26.3; `uvlock` keeps planks aligned in all four facings; a wall torch
 leans away from its wall (which fixes the sign of element rotation); pistons face where their state says; and `check` has
 no failures on every installed version.
 
-`tests/world_data.rs` has 9 more that read the saves on the machine (read only) and skip where there is none of the version:
+`tests/world_data.rs` has 9 more, behind the same `MC_UNPACK_REAL_DATA=1`, that read the saves on the machine (read only) and skip where there is none of the version:
 bare palette names are left out (never drawn as the first state of a blockstate); every region of the 26.3 saves loads with no failed chunk and every block is accounted for as drawn, left out or not in the jar;
 **the blocks of 4,405 finished chunks agree, column by column, with the `WORLD_SURFACE` heightmap the game itself saved** (an
 independent record of where the blocks are, which checks the bit packing, the section order, negative heights and the x/z order at
@@ -589,7 +593,7 @@ they change):
 
 This tool only reads a jar (and, for `world`, a save folder) on your own disk and writes files to a folder you name; it never
 writes to a save, and it sends nothing anywhere. A save is your content, and so are the exports of it: do not put worlds in this
-repository (the tests read the ones on the machine they run on and skip without them). It is made
+repository (the tests read the ones on the machine they run on only when asked to with `MC_UNPACK_REAL_DATA=1`). It is made
 and maintained by [patodois](https://github.com/patodois), who is responsible for it; reach them through this repository's
 [issues](https://github.com/patodois/mc-unpack/issues). The author is not affiliated with Mojang or Microsoft and does not
 claim the legality of reading your own install for any purpose you have in mind: that is yours to check.

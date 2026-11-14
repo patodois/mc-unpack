@@ -1,8 +1,11 @@
-//! Tests against real client jars. Each skips (and says so) when the jar is not installed, so
-//! the suite passes on a machine, or a CI runner, that has none. No game data is in this repository.
+//! Tests against real client jars. They are opt-in: without `MC_UNPACK_REAL_DATA=1` every test
+//! here skips (and says so) before anything is looked for, so `cargo test` reads nothing outside
+//! the repository. With it, each test still skips when its jar is not installed. No game data is
+//! in this repository.
 //!
-//! The jars are looked for where `mc-unpack versions` looks (Prism Launcher, the vanilla launcher,
-//! `MC_UNPACK_PRISM_DIR`, `MC_UNPACK_MINECRAFT_DIR`, `MC_UNPACK_JAR`).
+//! The jars are looked for where `mc-unpack versions` looks (the launchers' folders,
+//! `MC_UNPACK_PRISM_DIR`, `MC_UNPACK_MINECRAFT_DIR`, `MC_UNPACK_LAUNCHER_DIR`, `MC_UNPACK_JAR`),
+//! through `tests/common` only.
 
 #![allow(clippy::chunks_exact_to_as_chunks)]
 
@@ -10,13 +13,14 @@ use mc_unpack::assets::{Assets, LeftOut};
 use mc_unpack::bake::Quad;
 use mc_unpack::blockstate::State;
 use mc_unpack::check;
-use mc_unpack::install::find_jars;
 use mc_unpack::model::Dir;
 use mc_unpack::tint::{ColormapKind, Tint};
 use mc_unpack::version::{Layout, Support};
 
+mod common;
+
 fn open(version: &str) -> Option<Assets> {
-    let jar = find_jars().into_iter().find(|j| j.version == version)?;
+    let jar = common::jar(version)?;
     match Assets::open(&jar.path) {
         Ok(a) => Some(a),
         Err(e) => {
@@ -30,10 +34,8 @@ macro_rules! jar {
     ($v:expr) => {
         match open($v) {
             Some(a) => a,
-            None => {
-                eprintln!("skipping: Minecraft {} is not installed here", $v);
-                return;
-            }
+            // `common::jar` and `open` said why
+            None => return,
         }
     };
 }

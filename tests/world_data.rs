@@ -1,15 +1,16 @@
-//! Tests against real saves of the machine they run on. Each skips (and says so) when no save of
-//! the needed version is found, so the suite passes anywhere; **no world data is in this repository**
-//! and nothing is ever written to a save: the tests read it, and the damaged copies the fuzz test
-//! makes go to a temp folder.
+//! Tests against real saves of the machine they run on. They are opt-in: without
+//! `MC_UNPACK_REAL_DATA=1` every test here skips (and says so) before anything is looked for, so
+//! `cargo test` reads nothing outside the repository. With it, each test still skips when no save
+//! of the needed version is found. **No world data is in this repository** and nothing is ever
+//! written to a save: the tests read it, and the damaged copies the fuzz test makes go to the
+//! system temp folder.
 //!
-//! Saves are looked for where `mc-unpack worlds` looks (Prism Launcher instances, the vanilla
-//! launcher, `MC_UNPACK_SAVES`), jars where `mc-unpack versions` looks.
+//! Saves are looked for where `mc-unpack worlds` looks (the launchers' folders and instances,
+//! `MC_UNPACK_SAVES`), jars where `mc-unpack versions` looks, through `tests/common` only.
 
 use std::path::PathBuf;
 
 use mc_unpack::assets::Assets;
-use mc_unpack::install::find_jars;
 use mc_unpack::world::biomes::BiomeTable;
 use mc_unpack::world::blocks::{StateTable, AIR};
 use mc_unpack::world::chunk::{parse_chunk, unpack};
@@ -17,12 +18,13 @@ use mc_unpack::world::grid::{to_blocks, BlockGrid};
 use mc_unpack::world::mesher::{build, BuildOptions, Window};
 use mc_unpack::world::nbt::{self, Tag};
 use mc_unpack::world::region::Region;
-use mc_unpack::world::save::{discover_saves, World};
+use mc_unpack::world::save::World;
+
+mod common;
 
 /// The saves whose data version is `version`'s, with the jar that reads them
 fn saves_of(version: &str) -> Vec<(World, Assets)> {
-    let Some(jar) = find_jars().into_iter().find(|j| j.version == version) else {
-        eprintln!("skipping: Minecraft {version} is not installed here");
+    let Some(jar) = common::jar(version) else {
         return Vec::new();
     };
     let Ok(assets) = Assets::open(&jar.path) else {
@@ -30,7 +32,7 @@ fn saves_of(version: &str) -> Vec<(World, Assets)> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for s in discover_saves() {
+    for s in common::saves() {
         if let Ok(w) = World::open(&s.path) {
             if w.level.version_name.as_deref() == Some(version) {
                 out.push((w, Assets::open(&jar.path).unwrap()));
@@ -197,8 +199,7 @@ fn only_the_item_definitions_say_which_blocks_take_the_grass_colormap() {
     use mc_unpack::tint::ColormapKind;
     use mc_unpack::world::blocks::data_tint;
     for v in ["26.2", "26.3"] {
-        let Some(jar) = find_jars().into_iter().find(|j| j.version == v) else {
-            eprintln!("skipping: Minecraft {v} is not installed here");
+        let Some(jar) = common::jar(v) else {
             continue;
         };
         let a = Assets::open(&jar.path).unwrap();
@@ -234,7 +235,7 @@ fn only_the_item_definitions_say_which_blocks_take_the_grass_colormap() {
         }
     }
     // a jar from before the item definitions says nothing, grass included
-    if let Some(jar) = find_jars().into_iter().find(|j| j.version == "1.21.1") {
+    if let Some(jar) = common::jar("1.21.1") {
         let a = Assets::open(&jar.path).unwrap();
         assert_eq!(data_tint(&a, "grass_block"), None);
     }
@@ -243,13 +244,12 @@ fn only_the_item_definitions_say_which_blocks_take_the_grass_colormap() {
 #[test]
 fn a_world_of_numeric_ids_is_said_to_be_left_out_not_guessed() {
     // a 1.12.2 save, read with the 1.12.2 jar: every chunk is numeric ids
-    let Some(jar) = find_jars().into_iter().find(|j| j.version == "1.12.2") else {
-        eprintln!("skipping: Minecraft 1.12.2 is not installed here");
+    let Some(jar) = common::jar("1.12.2") else {
         return;
     };
     let a = Assets::open(&jar.path).unwrap();
     let mut seen = 0;
-    for s in discover_saves() {
+    for s in common::saves() {
         let Ok(w) = World::open(&s.path) else {
             continue;
         };
@@ -273,12 +273,11 @@ fn a_world_of_numeric_ids_is_said_to_be_left_out_not_guessed() {
 
 #[test]
 fn a_save_of_a_version_with_no_models_is_refused_with_the_reason() {
-    let Some(jar) = find_jars().into_iter().find(|j| j.version == "1.7.10") else {
-        eprintln!("skipping: Minecraft 1.7.10 is not installed here");
+    let Some(jar) = common::jar("1.7.10") else {
         return;
     };
     let a = Assets::open(&jar.path).unwrap();
-    for s in discover_saves() {
+    for s in common::saves() {
         let Ok(w) = World::open(&s.path) else {
             continue;
         };
@@ -306,11 +305,12 @@ fn real_regions_are_valid_scenes_the_checker_accepts() {
     use mc_unpack::bridge::Minecraft;
     use rewrite_bridge::conformance::{check_scene, Expect};
     use rewrite_bridge::{AssetKind, Provider};
-    let Some(jar) = find_jars().into_iter().find(|j| j.version == "26.3") else {
-        eprintln!("skipping: Minecraft 26.3 is not installed here");
+    let Some(jar) = common::jar("26.3") else {
         return;
     };
-    let mc = Minecraft::open(&jar.path).unwrap().with_discovered_saves();
+    let mc = Minecraft::open(&jar.path)
+        .unwrap()
+        .with_saves(common::saves());
     let levels: Vec<_> = mc
         .list("world/")
         .unwrap()

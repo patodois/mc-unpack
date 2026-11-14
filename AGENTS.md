@@ -41,7 +41,12 @@ The README builds the executable with `cargo build --release`.
 - Read individual jar entries without extracting the jar; enforce actual inflated-byte limits.
 - Keep JSON entries within 128 KiB, PNG entries within 8 MiB and decoded textures within the documented caps.
 - World defaults cap block data at 512 MiB and scene quads at 3,000,000; refuse over-limit windows explicitly.
-- Tests use synthetic data or the user's own install (`MC_UNPACK_JAR`); install-dependent tests skip if absent.
+- `cargo test` reads no install and no save: the tests build synthetic jars and saves, in the system temp folder
+  (the one place tests write outside the repository and the target folder).
+- The tests on real data (`tests/game_data.rs`, `tests/world_data.rs`) are opt-in: `MC_UNPACK_REAL_DATA=1 cargo test`
+  reads, never writes, the jars and saves in the user's launcher folders, and the fuzz test writes damaged copies of
+  real chunks to the temp folder. Without the variable they skip, saying so, before anything is looked for. Ask the
+  owner of the machine before setting it; reach installs and saves in tests through `tests/common` only.
 - No Mojang code/assets belong here; retain the README's unofficial-product disclaimer.
 
 ## Public files
